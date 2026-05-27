@@ -24,8 +24,32 @@ build/
 
 # Secrets & Config (keep templates, ignore actual secrets)
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+!.env.*.template
+config.env
+*.env
+*.local.env
+*.secret
+*.secrets
+*.token
+*.tokens
+*.credentials
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.*
+tokens.*
+credentials.*
 config/config.json
 .security.yml
+**/.security.yml
+**/config.env
+**/sessions/
+**/whatsapp-session/
 onboard
 
 

@@ -432,6 +432,20 @@ func TestProviderChat_StripsMoonshotPrefixAndNormalizesKimiTemperature(t *testin
 	}
 }
 
+func TestProviderChat_OmitsTemperatureForClaudeOpus47(t *testing.T) {
+	p := NewProvider("key", "https://example.com/v1", "")
+	requestBody := p.buildRequestBody(
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"anthropic/claude-opus-4-7",
+		map[string]any{"temperature": 0.7, "max_tokens": 512},
+	)
+
+	if _, ok := requestBody["temperature"]; ok {
+		t.Fatalf("temperature should be omitted for claude-opus-4-7, got %v", requestBody["temperature"])
+	}
+}
+
 func TestProviderChat_StripsKnownProviderPrefixes(t *testing.T) {
 	var requestBody map[string]any
 
@@ -840,6 +854,38 @@ func TestSerializeMessages_MediaWithToolCallID(t *testing.T) {
 	}
 }
 
+func TestSanitizeMessagesForToolSequencing_DropsOrphanToolResult(t *testing.T) {
+	messages := []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "tool", Content: "orphan", ToolCallID: "call_1"},
+		{Role: "assistant", Content: "done"},
+	}
+
+	got := sanitizeMessagesForToolSequencing(messages)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages after dropping orphan tool result, got %d", len(got))
+	}
+	if got[0].Role != "user" || got[1].Role != "assistant" {
+		t.Fatalf("unexpected roles: got %q, %q", got[0].Role, got[1].Role)
+	}
+}
+
+func TestSanitizeMessagesForToolSequencing_DropsIncompleteToolRound(t *testing.T) {
+	messages := []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "lookup"}}},
+		{Role: "user", Content: "next question"},
+	}
+
+	got := sanitizeMessagesForToolSequencing(messages)
+	if len(got) != 2 {
+		t.Fatalf("expected incomplete tool round to be removed, got %d messages", len(got))
+	}
+	if got[0].Role != "user" || got[1].Role != "user" {
+		t.Fatalf("unexpected roles after sanitization: %q, %q", got[0].Role, got[1].Role)
+	}
+}
+
 // chatWithCacheKey sets up a test server, sends a Chat request with prompt_cache_key,
 // and returns the decoded request body for assertion.
 func chatWithCacheKey(t *testing.T, apiBase string) map[string]any {
@@ -945,36 +991,28 @@ func TestSupportsPromptCacheKey(t *testing.T) {
 	}
 }
 
-func TestBuildToolsList_NativeSearchAddsWebSearchPreview(t *testing.T) {
+func TestBuildToolsList_ChatCompatDoesNotAddWebSearchPreview(t *testing.T) {
 	tools := []ToolDefinition{
 		{Type: "function", Function: ToolFunctionDefinition{Name: "read_file", Description: "read"}},
 	}
-	result := buildToolsList(tools, true)
-	if len(result) != 2 {
-		t.Fatalf("len(result) = %d, want 2", len(result))
-	}
-	wsEntry, ok := result[1].(map[string]any)
-	if !ok {
-		t.Fatalf("web search entry is %T, want map[string]any", result[1])
-	}
-	if wsEntry["type"] != "web_search_preview" {
-		t.Fatalf("type = %v, want web_search_preview", wsEntry["type"])
+	result := buildToolsList(tools, false)
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
 }
 
-func TestBuildToolsList_NativeSearchFiltersClientWebSearch(t *testing.T) {
+func TestBuildToolsList_ChatCompatKeepsClientWebSearch(t *testing.T) {
 	tools := []ToolDefinition{
 		{Type: "function", Function: ToolFunctionDefinition{Name: "web_search", Description: "search"}},
 		{Type: "function", Function: ToolFunctionDefinition{Name: "read_file", Description: "read"}},
 	}
-	result := buildToolsList(tools, true)
-	for _, entry := range result {
-		if td, ok := entry.(ToolDefinition); ok && strings.EqualFold(td.Function.Name, "web_search") {
-			t.Fatal("client-side web_search should be filtered out when native search is enabled")
-		}
+	result := buildToolsList(tools, false)
+	if len(result) != 2 {
+		t.Fatalf("len(result) = %d, want 2", len(result))
 	}
-	if len(result) != 2 { // read_file + web_search_preview
-		t.Fatalf("len(result) = %d, want 2 (read_file + web_search_preview)", len(result))
+	first, ok := result[0].(ToolDefinition)
+	if !ok || !strings.EqualFold(first.Function.Name, "web_search") {
+		t.Fatalf("first tool = %#v, want client-side web_search", result[0])
 	}
 }
 
@@ -1011,8 +1049,8 @@ func TestIsNativeSearchHost(t *testing.T) {
 
 func TestSupportsNativeSearch_OpenAI(t *testing.T) {
 	p := NewProvider("key", "https://api.openai.com/v1", "")
-	if !p.SupportsNativeSearch() {
-		t.Fatal("OpenAI provider should support native search")
+	if p.SupportsNativeSearch() {
+		t.Fatal("OpenAI Chat Completions-compatible provider should not advertise native search")
 	}
 }
 
@@ -1023,7 +1061,7 @@ func TestSupportsNativeSearch_NonOpenAI(t *testing.T) {
 	}
 }
 
-func TestProviderChat_NativeSearchToolInjected(t *testing.T) {
+func TestProviderChat_NativeSearchOptionDoesNotInjectPreviewTool(t *testing.T) {
 	var requestBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1070,16 +1108,11 @@ func TestProviderChat_NativeSearchToolInjected(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools is %T, want []any", requestBody["tools"])
 	}
-	if len(toolsRaw) != 2 {
-		t.Fatalf("len(tools) = %d, want 2 (read_file + web_search_preview)", len(toolsRaw))
+	if len(toolsRaw) != 1 {
+		t.Fatalf("len(tools) = %d, want 1 (read_file only)", len(toolsRaw))
 	}
-
-	lastTool, ok := toolsRaw[1].(map[string]any)
-	if !ok {
-		t.Fatalf("last tool is %T, want map[string]any", toolsRaw[1])
-	}
-	if lastTool["type"] != "web_search_preview" {
-		t.Fatalf("last tool type = %v, want web_search_preview", lastTool["type"])
+	if strings.Contains(fmt.Sprint(toolsRaw), "web_search_preview") {
+		t.Fatal("tools must not include web_search_preview for Chat Completions-compatible requests")
 	}
 }
 

@@ -118,15 +118,22 @@ func (p *Provider) buildRequestBody(
 	messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) map[string]any {
 	model = normalizeModel(model, p.apiBase)
+	messages = sanitizeMessagesForToolSequencing(messages)
+	serializedMessages := common.SerializeMessages(messages)
+	if requiresTextOnlyMessages(p.apiBase, model) {
+		serializedMessages = common.SerializeMessagesTextOnly(messages)
+	}
 
 	requestBody := map[string]any{
 		"model":    model,
-		"messages": common.SerializeMessages(messages),
+		"messages": serializedMessages,
 	}
 
-	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.
+	// Chat Completions-compatible endpoints only accept function/custom tools.
+	// OpenAI native web search (web_search_preview) belongs to the Responses API,
+	// so keep web_search as a normal client-side function tool here.
 	nativeSearch, _ := options["native_search"].(bool)
-	nativeSearch = nativeSearch && isNativeSearchHost(p.apiBase)
+	nativeSearch = false
 	if len(tools) > 0 || nativeSearch {
 		requestBody["tools"] = buildToolsList(tools, nativeSearch)
 		requestBody["tool_choice"] = "auto"
@@ -146,7 +153,7 @@ func (p *Provider) buildRequestBody(
 		requestBody[fieldName] = maxTokens
 	}
 
-	if temperature, ok := common.AsFloat(options["temperature"]); ok {
+	if temperature, ok := common.AsFloat(options["temperature"]); ok && supportsTemperature(model) {
 		lowerModel := strings.ToLower(model)
 		if strings.Contains(lowerModel, "kimi") && strings.Contains(lowerModel, "k2") {
 			requestBody["temperature"] = 1.0
@@ -172,6 +179,104 @@ func (p *Provider) buildRequestBody(
 	}
 
 	return requestBody
+}
+
+// sanitizeMessagesForToolSequencing removes orphan tool results and incomplete
+// tool-call rounds before serialization. Some providers are strict about
+// tool_result/tool_use ordering and reject a request if a tool result appears
+// without a matching assistant tool_use message immediately before it.
+func sanitizeMessagesForToolSequencing(messages []Message) []Message {
+	type pendingRound struct {
+		startIndex int
+		expected   map[string]bool
+		seen       map[string]bool
+	}
+
+	out := make([]Message, 0, len(messages))
+	round := pendingRound{startIndex: -1}
+
+	resetRound := func() {
+		round = pendingRound{startIndex: -1}
+	}
+
+	dropPendingRound := func() {
+		if round.startIndex >= 0 && round.startIndex <= len(out) {
+			out = out[:round.startIndex]
+		}
+		resetRound()
+	}
+
+	completeRound := func() {
+		resetRound()
+	}
+
+	for _, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			if round.startIndex >= 0 && len(round.expected) > len(round.seen) {
+				dropPendingRound()
+			}
+
+			round.startIndex = len(out)
+			round.expected = make(map[string]bool, len(msg.ToolCalls))
+			round.seen = make(map[string]bool, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" {
+					round.expected[tc.ID] = true
+				}
+			}
+			out = append(out, msg)
+			continue
+		}
+
+		if msg.ToolCallID != "" && (msg.Role == "tool" || msg.Role == "user") {
+			if round.startIndex < 0 || round.expected == nil {
+				continue
+			}
+			if !round.expected[msg.ToolCallID] {
+				continue
+			}
+			if round.seen[msg.ToolCallID] {
+				continue
+			}
+
+			out = append(out, msg)
+			round.seen[msg.ToolCallID] = true
+			if len(round.seen) == len(round.expected) {
+				completeRound()
+			}
+			continue
+		}
+
+		if round.startIndex >= 0 && len(round.expected) > len(round.seen) {
+			dropPendingRound()
+		} else {
+			resetRound()
+		}
+		out = append(out, msg)
+	}
+
+	if round.startIndex >= 0 && len(round.expected) > len(round.seen) {
+		dropPendingRound()
+	}
+
+	return out
+}
+
+func requiresTextOnlyMessages(apiBase, model string) bool {
+	apiBase = strings.ToLower(apiBase)
+	model = strings.ToLower(model)
+	if strings.Contains(apiBase, "api.deepseek.com") || strings.Contains(model, "deepseek") {
+		return true
+	}
+	return false
+}
+
+func supportsTemperature(model string) bool {
+	model = strings.ToLower(strings.ReplaceAll(model, ".", "-"))
+	if strings.Contains(model, "claude-opus-4-7") {
+		return false
+	}
+	return true
 }
 
 func (p *Provider) Chat(
@@ -437,7 +542,7 @@ func buildToolsList(tools []ToolDefinition, nativeSearch bool) []any {
 }
 
 func (p *Provider) SupportsNativeSearch() bool {
-	return isNativeSearchHost(p.apiBase)
+	return false
 }
 
 func isNativeSearchHost(apiBase string) bool {
