@@ -531,6 +531,8 @@ type picoStreamer struct {
 	channel          *PicoChannel
 	chatID           string
 	modelName        string
+	turnInputTokens  int
+	turnOutputTokens int
 	messageID        string
 	reasoningID      string
 	throttleInterval time.Duration
@@ -551,6 +553,17 @@ func (s *picoStreamer) SetModelName(modelName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.modelName = strings.TrimSpace(modelName)
+}
+
+// SetTurnUsage records the real per-turn LLM token usage to emit on finalize.
+func (s *picoStreamer) SetTurnUsage(inputTokens, outputTokens int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnInputTokens = inputTokens
+	s.turnOutputTokens = outputTokens
 }
 
 func (s *picoStreamer) Update(ctx context.Context, content string) error {
@@ -1400,6 +1413,20 @@ func setContextUsagePayload(payload map[string]any, u *bus.ContextUsage) {
 		"compress_at_tokens":  u.CompressAtTokens,
 		"summarize_at_tokens": u.SummarizeAtTokens,
 		"used_percent":        u.UsedPercent,
+	}
+}
+
+// setTurnUsagePayload attaches real per-turn LLM token usage to the payload.
+// Input and output are kept separate (billed at different rates); total is a
+// convenience sum. Omitted entirely when both counts are zero.
+func setTurnUsagePayload(payload map[string]any, inputTokens, outputTokens int) {
+	if inputTokens <= 0 && outputTokens <= 0 {
+		return
+	}
+	payload[PayloadKeyUsage] = map[string]any{
+		"input_tokens":  inputTokens,
+		"output_tokens": outputTokens,
+		"total_tokens":  inputTokens + outputTokens,
 	}
 }
 
