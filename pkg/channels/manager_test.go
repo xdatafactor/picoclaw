@@ -3448,3 +3448,55 @@ func TestSendWithRetry_BlocksLeakedInternalArtifactsOnClientFacingChannel(t *tes
 	}
 }
 
+// turnUsageTrackingStreamer is a mockStreamer that records SetTurnUsage calls,
+// used to verify the manager's streamer wrappers forward per-turn token usage
+// to the inner streamer (regression: the wrappers previously dropped it because
+// SetTurnUsage is not part of the bus.Streamer interface).
+type turnUsageTrackingStreamer struct {
+	mockStreamer
+	inputTokens  int
+	outputTokens int
+	usageCalls   int
+}
+
+func (m *turnUsageTrackingStreamer) SetTurnUsage(inputTokens, outputTokens int) {
+	m.usageCalls++
+	m.inputTokens = inputTokens
+	m.outputTokens = outputTokens
+}
+
+func TestFinalizeHookStreamerForwardsTurnUsage(t *testing.T) {
+	inner := &turnUsageTrackingStreamer{}
+	wrapper := &finalizeHookStreamer{Streamer: inner}
+
+	setter, ok := any(wrapper).(turnUsageStreamer)
+	if !ok {
+		t.Fatal("finalizeHookStreamer does not satisfy turnUsageStreamer")
+	}
+	setter.SetTurnUsage(1234, 567)
+
+	if inner.usageCalls != 1 {
+		t.Fatalf("inner SetTurnUsage calls = %d, want 1", inner.usageCalls)
+	}
+	if inner.inputTokens != 1234 || inner.outputTokens != 567 {
+		t.Errorf("inner usage = (%d, %d), want (1234, 567)", inner.inputTokens, inner.outputTokens)
+	}
+}
+
+func TestSplitMarkerStreamerForwardsTurnUsage(t *testing.T) {
+	inner := &turnUsageTrackingStreamer{}
+	wrapper := &splitMarkerStreamer{current: inner}
+
+	setter, ok := any(wrapper).(turnUsageStreamer)
+	if !ok {
+		t.Fatal("splitMarkerStreamer does not satisfy turnUsageStreamer")
+	}
+	setter.SetTurnUsage(1234, 567)
+
+	if inner.usageCalls != 1 {
+		t.Fatalf("inner SetTurnUsage calls = %d, want 1", inner.usageCalls)
+	}
+	if inner.inputTokens != 1234 || inner.outputTokens != 567 {
+		t.Errorf("inner usage = (%d, %d), want (1234, 567)", inner.inputTokens, inner.outputTokens)
+	}
+}
