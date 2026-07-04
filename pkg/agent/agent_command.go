@@ -333,7 +333,16 @@ func (al *AgentLoop) buildCommandsRuntime(
 			if opts == nil {
 				return fmt.Errorf("process options not available")
 			}
-			return al.clearAgentSessionContext(ctx, agent, opts.SessionKey)
+			// /clear can arrive before any turn has persisted session scope
+			// metadata (runAgentLoop records it per turn), so record it here to
+			// let the ContextManager resolve which agent owns the session.
+			ensureSessionMetadata(
+				agent.Sessions,
+				opts.Dispatch.SessionKey,
+				opts.Dispatch.SessionScope,
+				opts.Dispatch.SessionAliases,
+			)
+			return al.contextManager.Clear(ctx, opts.SessionKey)
 		}
 
 		rt.AskSideQuestion = func(ctx context.Context, question string) (string, error) {
@@ -361,40 +370,6 @@ func (al *AgentLoop) buildCommandsRuntime(
 		}
 	}
 	return rt
-}
-
-type contextStoreClearer interface {
-	ClearContextStore(ctx context.Context, sessionKey string) error
-}
-
-func (al *AgentLoop) clearAgentSessionContext(
-	ctx context.Context,
-	agent *AgentInstance,
-	sessionKey string,
-) error {
-	if agent == nil || agent.Sessions == nil {
-		return fmt.Errorf("sessions not initialized")
-	}
-	if al != nil && al.registry != nil && agent == al.registry.GetDefaultAgent() {
-		if al.contextManager != nil {
-			return al.contextManager.Clear(ctx, sessionKey)
-		}
-		return clearAgentSessionStore(agent, sessionKey)
-	}
-	if al != nil && al.contextManager != nil {
-		if clearer, ok := al.contextManager.(contextStoreClearer); ok {
-			if err := clearer.ClearContextStore(ctx, sessionKey); err != nil {
-				return err
-			}
-		}
-	}
-	return clearAgentSessionStore(agent, sessionKey)
-}
-
-func clearAgentSessionStore(agent *AgentInstance, sessionKey string) error {
-	agent.Sessions.SetHistory(sessionKey, []providers.Message{})
-	agent.Sessions.SetSummary(sessionKey, "")
-	return agent.Sessions.Save(sessionKey)
 }
 
 func summarizeMCPToolParameters(schema any) []commands.MCPToolParameterInfo {
