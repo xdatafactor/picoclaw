@@ -312,13 +312,17 @@ func (m AgentModelConfig) MarshalJSON() ([]byte, error) {
 }
 
 type AgentConfig struct {
-	ID        string            `json:"id"`
-	Default   bool              `json:"default,omitempty"`
-	Name      string            `json:"name,omitempty"`
-	Workspace string            `json:"workspace,omitempty"`
-	Model     *AgentModelConfig `json:"model,omitempty"`
-	Skills    []string          `json:"skills,omitempty"`
-	Subagents *SubagentsConfig  `json:"subagents,omitempty"`
+	// Omitted overrides inherit the global routing and media model settings.
+	Routing             *RoutingConfig    `json:"routing,omitempty"`
+	ImageModel          *string           `json:"image_model,omitempty"`
+	ImageModelFallbacks []string          `json:"image_model_fallbacks,omitempty"`
+	ID                  string            `json:"id"`
+	Default             bool              `json:"default,omitempty"`
+	Name                string            `json:"name,omitempty"`
+	Workspace           string            `json:"workspace,omitempty"`
+	Model               *AgentModelConfig `json:"model,omitempty"`
+	Skills              []string          `json:"skills,omitempty"`
+	Subagents           *SubagentsConfig  `json:"subagents,omitempty"`
 }
 
 type SubagentsConfig struct {

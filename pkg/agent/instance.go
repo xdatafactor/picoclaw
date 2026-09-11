@@ -44,6 +44,7 @@ type AgentInstance struct {
 	MCPServerAllowlist        map[string]struct{}
 	Candidates                []providers.FallbackCandidate
 	ImageCandidates           []providers.FallbackCandidate
+	ImageModel                string
 
 	// Router is non-nil when model routing is configured and the light model
 	// was successfully resolved. It scores each incoming message and decides
@@ -68,6 +69,20 @@ func NewAgentInstance(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentInstance {
+	// Copy defaults so one specialist's overrides cannot change other agents.
+	resolvedDefaults := *defaults
+	if agentCfg != nil {
+		if agentCfg.Routing != nil {
+			resolvedDefaults.Routing = agentCfg.Routing
+		}
+		if agentCfg.ImageModel != nil {
+			resolvedDefaults.ImageModel = *agentCfg.ImageModel
+			resolvedDefaults.ImageModelFallbacks = agentCfg.ImageModelFallbacks
+		} else if agentCfg.ImageModelFallbacks != nil {
+			resolvedDefaults.ImageModelFallbacks = agentCfg.ImageModelFallbacks
+		}
+	}
+	defaults = &resolvedDefaults
 	if cfg != nil {
 		// Keep the subprocess isolation runtime aligned with the latest loaded config
 		// before any tools or providers start spawning child processes.
@@ -263,6 +278,7 @@ func NewAgentInstance(
 		MaxTokens:                 maxTokens,
 		Temperature:               temperature,
 		ThinkingLevel:             thinkingLevel,
+		ImageModel:                defaults.ImageModel,
 		ThinkingLevelConfigured:   thinkingLevelConfigured,
 		ContextWindow:             contextWindow,
 		SummarizeMessageThreshold: summarizeMessageThreshold,
