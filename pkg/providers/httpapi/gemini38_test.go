@@ -33,11 +33,19 @@ func TestGemini38MediumPDFRequest(t *testing.T) {
 			t.Error("PDF missing from native inlineData")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+		_, _ = w.Write(
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`),
+		)
 	}))
 	defer server.Close()
 	p := NewGeminiProvider("test", server.URL, "", "test", 0, nil, nil)
-	_, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "Read PDF", Media: []string{"data:application/pdf;base64,JVBERi0xLjc="}}}, nil, "gemini-3.8-flash", map[string]any{"thinking_level": "medium", "temperature": 0.7})
+	_, err := p.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Read PDF", Media: []string{"data:application/pdf;base64,JVBERi0xLjc="}}},
+		nil,
+		"gemini-3.8-flash",
+		map[string]any{"thinking_level": "medium", "temperature": 0.7},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
