@@ -132,7 +132,10 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	switch {
 	case len(ts.agent.ImageCandidates) > 0:
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
-		targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
+		targetModelName = strings.TrimSpace(ts.agent.ImageModel)
+		if targetModelName == "" {
+			targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
+		}
 		routeReason = "configured_image_model"
 	case exec.usedLight && len(ts.agent.Candidates) > 0:
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.Candidates...)

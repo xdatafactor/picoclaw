@@ -340,7 +340,7 @@ func (p *GeminiProvider) buildRequestBody(
 			generationConfig["maxOutputTokens"] = int(maxTokens)
 		}
 	}
-	if temp, ok := options["temperature"].(float64); ok {
+	if temp, ok := options["temperature"].(float64); ok && !isGemini38FlashModel(model) {
 		generationConfig["temperature"] = temp
 	}
 
@@ -416,8 +416,9 @@ func buildGeminiThinkingConfig(model string, options map[string]any) map[string]
 		return config
 	}
 
-	if isGemini3ProModel(model) && (rawLevel == "off" || rawLevel == "minimal") {
-		// Gemini 3.x Pro does not support minimal thinking level.
+	if (isGemini3ProModel(model) || isGemini38FlashModel(model)) && (rawLevel == "off" || rawLevel == "minimal") {
+		// Gemini 3.x Pro and 3.8 Flash reject minimal. Omit the level to use
+		// the model default; explicitly configured medium is preserved below.
 		return config
 	}
 
@@ -430,6 +431,11 @@ func buildGeminiThinkingConfig(model string, options map[string]any) map[string]
 func geminiModelSupportsThinkingConfig(model string) bool {
 	lowerModel := strings.ToLower(strings.TrimSpace(model))
 	return strings.Contains(lowerModel, "gemini-3") || isGemini25Model(lowerModel)
+}
+
+func isGemini38FlashModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "gemini-3.8-flash" || strings.HasPrefix(model, "gemini-3.8-flash-")
 }
 
 func isGemini25Model(model string) bool {
