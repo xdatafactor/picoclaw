@@ -112,6 +112,8 @@ func (t *XDFIntakeTool) Parameters() map[string]any {
 			"client_email":    map[string]any{"type": "string"},
 			"meeting_format":  map[string]any{"type": "string", "enum": []string{"virtual", "presencial"}},
 			"selection_text":  map[string]any{"type": "string"},
+			"slot_batch_id":   map[string]any{"type": "string", "description": "Use the ID returned with the offered slots; never invent one"},
+			"refresh":         map[string]any{"type": "boolean", "description": "Only true when the customer explicitly requests different slots, abandoning the saved selection"},
 			"option":          map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
 			"attendee_email":  map[string]any{"type": "string"},
 			"expires_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 180},
@@ -184,11 +186,12 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 			"client_email": xdfArgString(args, "client_email"), "meeting_format": xdfMeetingFormat(args),
 			"expires_minutes": xdfBoundedInt(args, "expires_minutes", 5, 180, 30),
 		}
+		payload["refresh"], _ = args["refresh"].(bool)
 		path = "/calendar/slots"
 	case "calendar_create":
 		email := strings.TrimSpace(xdfArgString(args, "attendee_email"))
-		if email == "" || !strings.Contains(email, "@") {
-			return ErrorResult("calendar_create requires attendee_email")
+		if email != "" && !strings.Contains(email, "@") {
+			return ErrorResult("attendee_email must be a valid email when supplied")
 		}
 		payload = map[string]any{
 			"channel": channel, "chat_id": chatID, "summary": "Reuniao R. Freire",
@@ -196,9 +199,7 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 			"attendee_email": email, "selection_text": xdfArgString(args, "selection_text"),
 			"chosen_slot": xdfArgString(args, "chosen_slot"), "option": xdfBoundedInt(args, "option", 1, 50, 0),
 			"tax_id": xdfArgString(args, "tax_id"), "meeting_format": xdfMeetingFormat(args),
-		}
-		if payload["selection_text"] == "" && payload["chosen_slot"] == "" && payload["option"].(int) == 0 {
-			return ErrorResult("calendar_create requires selection_text, chosen_slot, or option")
+			"slot_batch_id": xdfArgString(args, "slot_batch_id"),
 		}
 		path = "/calendar/create"
 	case "list_categories":
@@ -225,6 +226,9 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	result, err := t.postJSON(ctx, path, payload)
 	if err != nil {
+		if result != "" {
+			return ErrorResult(result).WithError(err)
+		}
 		return ErrorResult(err.Error()).WithError(err)
 	}
 	return NewToolResult(result)
@@ -293,6 +297,22 @@ func (t *XDFIntakeTool) postJSON(ctx context.Context, path string, payload map[s
 		return "", fmt.Errorf("XDF response exceeds size limit")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Calendar failures contain actionable, conversation-bound information.
+		// Preserve only these safe fields so ambiguity and a missing email do
+		// not collapse into an opaque HTTP error and restart slot selection.
+		if path == "/calendar/create" {
+			var body map[string]json.RawMessage
+			if json.Unmarshal(data, &body) == nil && body["status"] != nil {
+				safe := make(map[string]json.RawMessage)
+				for _, key := range []string{"ok", "status", "message", "candidates", "error", "slot_batch_id", "chosen_slot"} {
+					if value, exists := body[key]; exists {
+						safe[key] = value
+					}
+				}
+				encoded, _ := json.Marshal(safe)
+				return string(encoded), fmt.Errorf("XDF Go Engine returned HTTP %d", resp.StatusCode)
+			}
+		}
 		var errResp struct {
 			Error    string `json:"error"`
 			Response string `json:"response"`

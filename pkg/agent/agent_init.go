@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
@@ -125,6 +127,22 @@ func registerSharedTools(
 		agent, ok := registry.GetAgent(agentID)
 		if !ok {
 			continue
+		}
+
+		// The public WhatsApp agent gets one structured domain bridge instead of
+		// shell, generic filesystem, MCP, or subagent capabilities.
+		if agentID == "rodolfo-rfreire" {
+			xdfTool, err := tools.NewXDFIntakeTool(
+				os.Getenv("XDF_GO_ENGINE_URL"),
+				os.Getenv("XDF_INTERNAL_API_TOKEN_FILE"),
+				media.TempDir(),
+				int64(cfg.Agents.Defaults.GetMaxMediaSize()),
+			)
+			if err != nil {
+				logger.ErrorCF("agent", "Failed to create XDF intake tool", map[string]any{"error": err.Error()})
+			} else {
+				agent.Tools.Register(xdfTool)
+			}
 		}
 
 		if cfg.Tools.IsToolEnabled("web") {

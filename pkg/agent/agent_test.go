@@ -6117,6 +6117,61 @@ func TestProcessMessage_DoesNotLeakReasoningContentInToolFeedback(t *testing.T) 
 	}
 }
 
+func TestProcessMessage_DoesNotPublishToolFeedbackForWhatsApp(t *testing.T) {
+	for _, channel := range []string{config.ChannelWhatsApp, config.ChannelWhatsAppNative} {
+		t.Run(channel, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			heartbeatFile := filepath.Join(tmpDir, "tool-feedback-whatsapp.txt")
+			if err := os.WriteFile(heartbeatFile, []byte("tool feedback task"), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			cfg := &config.Config{
+				Agents: config.AgentsConfig{
+					Defaults: config.AgentDefaults{
+						Workspace:         tmpDir,
+						ModelName:         "test-model",
+						MaxTokens:         4096,
+						MaxToolIterations: 10,
+						ToolFeedback: config.ToolFeedbackConfig{
+							Enabled:       true,
+							MaxArgsLength: 300,
+						},
+					},
+				},
+				Tools: config.ToolsConfig{
+					ReadFile: config.ReadFileToolConfig{
+						Enabled: true,
+					},
+				},
+			}
+
+			msgBus := bus.NewMessageBus()
+			provider := &toolFeedbackProvider{filePath: heartbeatFile}
+			al := NewAgentLoop(cfg, msgBus, provider)
+
+			response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
+				Channel:  channel,
+				SenderID: "user-1",
+				ChatID:   "chat-1",
+				Content:  "check tool feedback",
+			}))
+			if err != nil {
+				t.Fatalf("processMessage() error = %v", err)
+			}
+			if response != "HEARTBEAT_OK" {
+				t.Fatalf("processMessage() response = %q, want %q", response, "HEARTBEAT_OK")
+			}
+
+			select {
+			case outbound := <-msgBus.OutboundChan():
+				t.Fatalf("expected no outbound tool feedback for %s, got %+v", channel, outbound)
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestProcessMessage_DoesNotPublishToolFeedbackForDiscordWhenDisabled(t *testing.T) {
 	assertToolFeedbackNotPublishedWhenDisabled(t, "discord")
 }

@@ -220,6 +220,9 @@ func shouldPublishToolFeedback(cfg *config.Config, ts *turnState) bool {
 	if ts == nil || ts.channel == "" || ts.opts.SuppressToolFeedback {
 		return false
 	}
+	if ts.channel == config.ChannelWhatsApp || ts.channel == config.ChannelWhatsAppNative {
+		return false
+	}
 	return cfg != nil && cfg.Agents.Defaults.IsToolFeedbackEnabled()
 }
 

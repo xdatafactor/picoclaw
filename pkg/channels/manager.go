@@ -163,6 +163,17 @@ func outboundMessageChatID(msg bus.OutboundMessage) string {
 	return msg.ChatID
 }
 
+// isWhatsAppBroadcastTarget reports whether a chat ID targets a WhatsApp
+// broadcast/status JID (e.g. status@broadcast). Sending to these JIDs posts
+// a status/story on the account, which is explicitly forbidden for every
+// channel. This guard is central: it protects all outbound paths (text,
+// media, and direct channel sends).
+func isWhatsAppBroadcastTarget(chatID string) bool {
+	lower := strings.ToLower(strings.TrimSpace(chatID))
+	return strings.Contains(lower, "status@broadcast") ||
+		strings.HasSuffix(lower, "@broadcast")
+}
+
 func outboundMessageIsToolFeedback(msg bus.OutboundMessage) bool {
 	if len(msg.Context.Raw) == 0 {
 		return false
@@ -1522,6 +1533,21 @@ func (m *Manager) sendWithRetry(
 	w *channelWorker,
 	msg bus.OutboundMessage,
 ) ([]string, bool) {
+	// Central safety guard: never emit internal CoT reasoning, system prompts, or diagnostic artifacts to client-facing channels.
+	if constants.IsClientFacingChannel(name) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
+		logger.ErrorCF(
+			"channels",
+			"CRITICAL: Central channel manager blocked outbound message containing leaked internal artifacts",
+			map[string]any{
+				"channel":     name,
+				"chat_id":     outboundMessageChatID(msg),
+				"session_key": msg.SessionKey,
+				"content_len": len(msg.Content),
+			},
+		)
+		return nil, true // Treat as handled so workers don't retry or stall
+	}
+
 	// Rate limit: wait for token
 	if err := w.limiter.Wait(ctx); err != nil {
 		// ctx canceled, shutting down
@@ -2013,6 +2039,26 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	msg = bus.NormalizeOutboundMessage(msg)
 	channelName := outboundMessageChannel(msg)
 
+	// Central safety guard: never allow sending to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(outboundMessageChatID(msg)) {
+		return fmt.Errorf("outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)", outboundMessageChatID(msg))
+	}
+
+	if constants.IsClientFacingChannel(channelName) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
+		logger.ErrorCF(
+			"channels",
+			"CRITICAL: SendMessage blocked outbound message containing leaked internal artifacts",
+			map[string]any{
+				"channel":     channelName,
+				"chat_id":     outboundMessageChatID(msg),
+				"session_key": msg.SessionKey,
+				"content_len": len(msg.Content),
+			},
+		)
+		return fmt.Errorf("outbound blocked: message contains leaked internal artifacts")
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
@@ -2052,6 +2098,12 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 	msg = bus.NormalizeOutboundMediaMessage(msg)
 	channelName := outboundMediaChannel(msg)
 
+	// Central safety guard: never allow media to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(outboundMediaChatID(msg)) {
+		return fmt.Errorf("outbound blocked: refusing to send media to broadcast/status JID %q (stories are disabled)", outboundMediaChatID(msg))
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
@@ -2069,6 +2121,12 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 }
 
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {
+	// Central safety guard: never allow sending to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(chatID) {
+		return fmt.Errorf("outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)", chatID)
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]

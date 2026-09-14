@@ -609,6 +609,23 @@ func (al *AgentLoop) runAgentLoop(
 			msg.Context.Raw["model_name"] = modelName
 		}
 		markFinalOutbound(&msg)
+
+		// Defense-in-depth: Never emit internal CoT reasoning, system prompts, or diagnostic artifacts to client-facing channels.
+		channel := msg.Context.Channel
+		if constants.IsClientFacingChannel(channel) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
+			logger.ErrorCF(
+				"agent",
+				"CRITICAL: Blocked outbound message in runAgentLoop containing leaked internal artifacts",
+				map[string]any{
+					"channel":     channel,
+					"chat_id":     msg.ChatID,
+					"session_key": sessionKey,
+					"content_len": len(msg.Content),
+				},
+			)
+			return "", nil
+		}
+
 		al.bus.PublishOutbound(ctx, msg)
 	}
 

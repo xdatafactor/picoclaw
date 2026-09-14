@@ -3383,3 +3383,68 @@ func TestManager_SendPlaceholder(t *testing.T) {
 		t.Error("expected SendPlaceholder to fail for unknown channel")
 	}
 }
+
+func TestIsWhatsAppBroadcastTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		chatID string
+		want   bool
+	}{
+		{name: "status broadcast exact", chatID: "status@broadcast", want: true},
+		{name: "status broadcast with whitespace", chatID: "  status@broadcast  ", want: true},
+		{name: "status broadcast uppercase", chatID: "STATUS@BROADCAST", want: true},
+		{name: "other broadcast suffix", chatID: "newsletter@broadcast", want: true},
+		{name: "plain whatsapp number", chatID: "5511999999999", want: false},
+		{name: "jid user", chatID: "107692160979172@lid", want: false},
+		{name: "group jid", chatID: "123456789-123456@g.us", want: false},
+		{name: "empty", chatID: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWhatsAppBroadcastTarget(tt.chatID); got != tt.want {
+				t.Fatalf("isWhatsAppBroadcastTarget(%q) = %v, want %v", tt.chatID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSendWithRetry_BlocksLeakedInternalArtifactsOnClientFacingChannel(t *testing.T) {
+	m := newTestManager()
+	var callCount int
+	ch := &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error {
+			callCount++
+			return nil
+		},
+	}
+	w := &channelWorker{
+		ch:      ch,
+		limiter: rate.NewLimiter(rate.Inf, 1),
+	}
+
+	ctx := context.Background()
+	leakedMsg := testOutboundMessage(bus.OutboundMessage{
+		Channel: "whatsapp_native",
+		ChatID:  "90779234103389@lid",
+		Content: "Registrado. Recapitulando a sequência de falhas de hoje:\n1. 🔴 Gemini 404 — api_base da rota OpenAI-compatível inválido",
+	})
+
+	m.sendWithRetry(ctx, "whatsapp_native", w, leakedMsg)
+
+	if callCount != 0 {
+		t.Fatalf("expected sendWithRetry to drop leaked message, but Send was called %d times", callCount)
+	}
+
+	// Normal customer message should pass
+	normalMsg := testOutboundMessage(bus.OutboundMessage{
+		Channel: "whatsapp_native",
+		ChatID:  "90779234103389@lid",
+		Content: "Olá Wallace, seu agendamento foi confirmado!",
+	})
+	m.sendWithRetry(ctx, "whatsapp_native", w, normalMsg)
+
+	if callCount != 1 {
+		t.Fatalf("expected normal message to be sent once, got %d calls", callCount)
+	}
+}
+

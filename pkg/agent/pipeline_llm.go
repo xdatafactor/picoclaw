@@ -565,9 +565,9 @@ func (p *Pipeline) CallLLM(
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
-		if responseContent == "" && exec.response.ReasoningContent != "" && ts.channel != "pico" {
-			responseContent = exec.response.ReasoningContent
-		}
+		// NOTE: ReasoningContent is internal thinking (Chain of Thought)
+		// and must NEVER be promoted to responseContent, which would leak
+		// system prompts and reasoning traces to external chat channels.
 		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			logger.InfoCF("agent", "Steering arrived after direct LLM response; continuing turn",
