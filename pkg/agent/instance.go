@@ -210,6 +210,9 @@ func NewAgentInstance(
 	}
 
 	maxTokens := defaults.MaxTokens
+	if agentCfg != nil && agentCfg.MaxTokens > 0 {
+		maxTokens = agentCfg.MaxTokens
+	}
 	if maxTokens == 0 {
 		maxTokens = 8192
 	}

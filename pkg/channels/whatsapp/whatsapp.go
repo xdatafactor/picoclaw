@@ -133,7 +133,10 @@ func (c *WhatsAppChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 	// on the account. This is an explicit, non-negotiable safety rule.
 	if strings.Contains(msg.ChatID, "status@broadcast") ||
 		strings.Contains(msg.ChatID, "@broadcast") {
-		return nil, fmt.Errorf("whatsapp send blocked: refusing to send to broadcast/status JID %q (stories are disabled)", msg.ChatID)
+		return nil, fmt.Errorf(
+			"whatsapp send blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			msg.ChatID,
+		)
 	}
 
 	payload := map[string]any{
