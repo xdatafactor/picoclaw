@@ -116,6 +116,7 @@ func (t *XDFIntakeTool) Parameters() map[string]any {
 			"refresh":         map[string]any{"type": "boolean", "description": "Only true when the customer explicitly requests different slots, abandoning the saved selection"},
 			"option":          map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
 			"attendee_email":  map[string]any{"type": "string"},
+			"guest_emails":    map[string]any{"type": "array", "maxItems": 10, "items": map[string]any{"type": "string"}, "description": "Additional meeting invitees explicitly requested by the customer. Never put them in client_email or attendee_email."},
 			"expires_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 180},
 		},
 		"required": []string{"action"},
@@ -197,7 +198,8 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 			"channel": channel, "chat_id": chatID, "summary": "Reuniao R. Freire",
 			"description": "Reuniao solicitada no atendimento WhatsApp", "conference": true,
 			"attendee_email": email, "selection_text": xdfArgString(args, "selection_text"),
-			"chosen_slot": xdfArgString(args, "chosen_slot"), "option": xdfBoundedInt(args, "option", 1, 50, 0),
+			"guest_emails": xdfArgStrings(args, "guest_emails"),
+			"chosen_slot":  xdfArgString(args, "chosen_slot"), "option": xdfBoundedInt(args, "option", 1, 50, 0),
 			"tax_id": xdfArgString(args, "tax_id"), "meeting_format": xdfMeetingFormat(args),
 			"slot_batch_id": xdfArgString(args, "slot_batch_id"),
 		}

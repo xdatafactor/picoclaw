@@ -243,7 +243,11 @@ func (p *Pipeline) CallLLM(
 			candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
 			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
-			return candidateProvider.Chat(ctx, messagesForCall, candidateTools, candidate.Model, callOpts)
+			response, err := candidateProvider.Chat(ctx, messagesForCall, candidateTools, candidate.Model, callOpts)
+			if err == nil {
+				err = providers.ValidateLLMResponse(response)
+			}
+			return response, err
 		}
 
 		if len(exec.activeCandidates) > 1 && p.Fallback != nil {
@@ -289,7 +293,11 @@ func (p *Pipeline) CallLLM(
 			}
 			return fbResult.Response, nil
 		}
-		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
+		response, err := exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
+		if err == nil {
+			err = providers.ValidateLLMResponse(response)
+		}
+		return response, err
 	}
 
 	// Retry loop
@@ -504,6 +512,14 @@ func (p *Pipeline) CallLLM(
 				"model":     exec.llmModel,
 				"error":     err.Error(),
 			})
+		if ts.agent.ID == "rodolfo-rfreire" && ts.channel == "whatsapp_native" && ctx.Err() == nil {
+			exec.finalContent = rodolfoUnavailableResponse
+			return ControlBreak, nil
+		}
+		if classified := providers.ClassifyError(err, "", ""); classified != nil && classified.Reason == providers.FailoverEmptyResponse && ctx.Err() == nil {
+			exec.finalContent = ts.opts.DefaultResponse
+			return ControlBreak, nil
+		}
 		return ControlBreak, fmt.Errorf("LLM call failed after retries: %w", err)
 	}
 
@@ -589,6 +605,7 @@ func (p *Pipeline) CallLLM(
 	)
 
 	llmResponseFields := map[string]any{
+		"finish_reason":  exec.response.FinishReason,
 		"agent_id":       ts.agent.ID,
 		"iteration":      iteration,
 		"content_chars":  len(exec.response.Content),
@@ -607,6 +624,9 @@ func (p *Pipeline) CallLLM(
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
+		if strings.TrimSpace(responseContent) == "" && ts.agent.ID == "rodolfo-rfreire" && ts.channel == "whatsapp_native" {
+			responseContent = rodolfoUnavailableResponse
+		}
 		// NOTE: ReasoningContent is internal thinking (Chain of Thought)
 		// and must NEVER be promoted to responseContent, which would leak
 		// system prompts and reasoning traces to external chat channels.
@@ -825,6 +845,8 @@ func transientLLMRetryReason(err error) (string, bool) {
 
 	if failErr := providers.ClassifyError(err, "", ""); failErr != nil {
 		switch failErr.Reason {
+		case providers.FailoverEmptyResponse:
+			return "empty_response", true
 		case providers.FailoverTimeout:
 			if failErr.Status >= 500 {
 				return "server_error", true
