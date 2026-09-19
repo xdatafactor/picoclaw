@@ -124,6 +124,9 @@ func NewAgentInstance(
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 
 	restrict := defaults.RestrictToWorkspace
+	if agentCfg.RestrictToWorkspace != nil {
+		restrict = *agentCfg.RestrictToWorkspace
+	}
 	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
 
 	// Compile path whitelist patterns from config.

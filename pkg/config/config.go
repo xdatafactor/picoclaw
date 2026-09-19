@@ -313,17 +313,18 @@ func (m AgentModelConfig) MarshalJSON() ([]byte, error) {
 
 type AgentConfig struct {
 	// Omitted overrides inherit the global routing and media model settings.
-	Routing             *RoutingConfig    `json:"routing,omitempty"`
-	ImageModel          *string           `json:"image_model,omitempty"`
-	ImageModelFallbacks []string          `json:"image_model_fallbacks,omitempty"`
-	ID                  string            `json:"id"`
-	Default             bool              `json:"default,omitempty"`
-	Name                string            `json:"name,omitempty"`
-	Workspace           string            `json:"workspace,omitempty"`
-	Model               *AgentModelConfig `json:"model,omitempty"`
-	MaxTokens           int               `json:"max_tokens,omitempty"`
-	Skills              []string          `json:"skills,omitempty"`
-	Subagents           *SubagentsConfig  `json:"subagents,omitempty"`
+	Routing              *RoutingConfig    `json:"routing,omitempty"`
+	ImageModel           *string           `json:"image_model,omitempty"`
+	ImageModelFallbacks  []string          `json:"image_model_fallbacks,omitempty"`
+	ID                   string            `json:"id"`
+	Default              bool              `json:"default,omitempty"`
+	Name                 string            `json:"name,omitempty"`
+	Workspace            string            `json:"workspace,omitempty"`
+	Model                *AgentModelConfig `json:"model,omitempty"`
+	MaxTokens            int               `json:"max_tokens,omitempty"`
+	Skills               []string          `json:"skills,omitempty"`
+	Subagents            *SubagentsConfig  `json:"subagents,omitempty"`
+	RestrictToWorkspace  *bool             `json:"restrict_to_workspace,omitempty"`
 }
 
 type SubagentsConfig struct {
@@ -1044,6 +1045,7 @@ type ExecConfig struct {
 	ToolConfig          `         envPrefix:"PICOCLAW_TOOLS_EXEC_"`
 	EnableDenyPatterns  bool     `                                 json:"enable_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	AllowRemote         bool     `                                 json:"allow_remote"          env:"PICOCLAW_TOOLS_EXEC_ALLOW_REMOTE"`
+	AllowedRemotes      []string `                                 json:"allowed_remotes"       env:"PICOCLAW_TOOLS_EXEC_ALLOWED_REMOTES"`
 	CustomDenyPatterns  []string `                                 json:"custom_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
 	CustomAllowPatterns []string `                                 json:"custom_allow_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_ALLOW_PATTERNS"`
 	TimeoutSeconds      int      `                                 json:"timeout_seconds"       env:"PICOCLAW_TOOLS_EXEC_TIMEOUT_SECONDS"` // 0 means use default (60s)

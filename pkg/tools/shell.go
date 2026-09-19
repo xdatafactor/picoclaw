@@ -45,6 +45,7 @@ type ExecTool struct {
 	allowedPathPatterns []*regexp.Regexp
 	restrictToWorkspace bool
 	allowRemote         bool
+	allowedRemotes      []string
 	sessionManager      *SessionManager
 }
 
@@ -198,6 +199,11 @@ func NewExecToolWithConfig(
 		timeout = time.Duration(cfg.Tools.Exec.TimeoutSeconds) * time.Second
 	}
 
+	var allowedRemotes []string
+	if cfg != nil {
+		allowedRemotes = cfg.Tools.Exec.AllowedRemotes
+	}
+
 	return &ExecTool{
 		workingDir:          workingDir,
 		timeout:             timeout,
@@ -207,6 +213,7 @@ func NewExecToolWithConfig(
 		allowedPathPatterns: allowedPathPatterns,
 		restrictToWorkspace: restrict,
 		allowRemote:         allowRemote,
+		allowedRemotes:      allowedRemotes,
 		sessionManager:      getSessionManager(),
 	}, nil
 }
@@ -305,8 +312,9 @@ func (t *ExecTool) executeRun(ctx context.Context, args map[string]any) *ToolRes
 		if channel == "" {
 			channel, _ = args["__channel"].(string)
 		}
+		chatID := ToolChatID(ctx)
 		channel = strings.TrimSpace(channel)
-		if channel == "" || !constants.IsInternalChannel(channel) {
+		if channel == "" || (!constants.IsInternalChannel(channel) && !isExecAllowedRemote(channel, chatID, t.allowedRemotes)) {
 			return ErrorResult("exec is restricted to internal channels")
 		}
 	}
@@ -381,6 +389,28 @@ func (t *ExecTool) executeRun(ctx context.Context, args map[string]any) *ToolRes
 	}
 
 	return t.runSync(ctx, command, cwd)
+}
+
+// isExecAllowedRemote returns true if the given channel+chatID pair is explicitly
+// listed in the allowed remotes slice. Supports "channel:chatID", "channel", or "*".
+func isExecAllowedRemote(channel, chatID string, allowed []string) bool {
+	if channel == "" {
+		return false
+	}
+	target := channel
+	if chatID != "" {
+		target = channel + ":" + chatID
+	}
+	for _, entry := range allowed {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == "*" || entry == channel || entry == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult {
