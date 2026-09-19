@@ -14,7 +14,7 @@ import (
 func TestXDFCalendarGuestsRemainSeparateFromPrimary(t *testing.T) {
 	root := t.TempDir()
 	token := filepath.Join(root, "token")
-	if err := os.WriteFile(token, []byte("test-token"), 0600); err != nil {
+	if err := os.WriteFile(token, []byte("test-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tool, err := NewXDFIntakeTool(defaultXDFEngineURL, token, root, 1024)
@@ -26,9 +26,21 @@ func TestXDFCalendarGuestsRemainSeparateFromPrimary(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
 			t.Fatal(err)
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true}`)), Header: make(http.Header)}, nil
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Header:     make(http.Header),
+		}, nil
 	})
-	result := tool.Execute(WithToolContext(context.Background(), "whatsapp_native", "client@lid"), map[string]any{"action": "calendar_create", "attendee_email": "client@example.com", "guest_emails": []any{"guest@example.com"}, "selection_text": "18/09/2026 as 14h"})
+	result := tool.Execute(
+		WithToolContext(context.Background(), "whatsapp_native", "client@lid"),
+		map[string]any{
+			"action":         "calendar_create",
+			"attendee_email": "client@example.com",
+			"guest_emails":   []any{"guest@example.com"},
+			"selection_text": "18/09/2026 as 14h",
+		},
+	)
 	if result.IsError || received["attendee_email"] != "client@example.com" {
 		t.Fatalf("result=%+v payload=%v", result, received)
 	}

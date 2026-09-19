@@ -293,7 +293,13 @@ func (p *Pipeline) CallLLM(
 			}
 			return fbResult.Response, nil
 		}
-		response, err := exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
+		response, err := exec.activeProvider.Chat(
+			providerCtx,
+			messagesForCall,
+			toolDefsForCall,
+			exec.llmModel,
+			exec.llmOpts,
+		)
 		if err == nil {
 			err = providers.ValidateLLMResponse(response)
 		}
@@ -516,7 +522,9 @@ func (p *Pipeline) CallLLM(
 			exec.finalContent = rodolfoUnavailableResponse
 			return ControlBreak, nil
 		}
-		if classified := providers.ClassifyError(err, "", ""); classified != nil && classified.Reason == providers.FailoverEmptyResponse && ctx.Err() == nil {
+		if classified := providers.ClassifyError(err, "", ""); classified != nil &&
+			classified.Reason == providers.FailoverEmptyResponse &&
+			ctx.Err() == nil {
 			exec.finalContent = ts.opts.DefaultResponse
 			return ControlBreak, nil
 		}
@@ -587,7 +595,8 @@ func (p *Pipeline) CallLLM(
 			al.publishPicoReasoning(turnCtx, reasoningContent, ts.chatID, ts.sessionKey, exec.llmModelName)
 		}
 	} else {
-		go al.handleReasoning(
+		// Publish before turn teardown cancels turnCtx, as for Pico above.
+		al.handleReasoning(
 			turnCtx,
 			reasoningContent,
 			ts.channel,
@@ -624,7 +633,8 @@ func (p *Pipeline) CallLLM(
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
-		if strings.TrimSpace(responseContent) == "" && ts.agent.ID == "rodolfo-rfreire" && ts.channel == "whatsapp_native" {
+		if strings.TrimSpace(responseContent) == "" && ts.agent.ID == "rodolfo-rfreire" &&
+			ts.channel == "whatsapp_native" {
 			responseContent = rodolfoUnavailableResponse
 		}
 		// NOTE: ReasoningContent is internal thinking (Chain of Thought)

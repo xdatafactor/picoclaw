@@ -93,7 +93,15 @@ func (t *XDFIntakeTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type": "string",
-				"enum": []string{"process", "reset", "choose_slot", "calendar_slots", "calendar_create", "list_categories", "add_keyword"},
+				"enum": []string{
+					"process",
+					"reset",
+					"choose_slot",
+					"calendar_slots",
+					"calendar_create",
+					"list_categories",
+					"add_keyword",
+				},
 			},
 			"text": map[string]any{"type": "string", "description": "Customer message or an accurate intake summary"},
 			"media": map[string]any{

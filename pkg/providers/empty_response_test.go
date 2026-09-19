@@ -47,11 +47,15 @@ func TestToolOnlyAndFilteredResponsesDoNotTriggerFallback(t *testing.T) {
 func TestAllEmptyAnswersExhaustBoundedCandidates(t *testing.T) {
 	chain := NewFallbackChain(NewCooldownTracker(), nil)
 	calls := 0
-	_, err := chain.Execute(context.Background(), []FallbackCandidate{makeCandidate("first", "first"), makeCandidate("second", "second")}, func(context.Context, string, string) (*LLMResponse, error) {
-		calls++
-		response := &LLMResponse{FinishReason: "length"}
-		return response, ValidateLLMResponse(response)
-	})
+	_, err := chain.Execute(
+		context.Background(),
+		[]FallbackCandidate{makeCandidate("first", "first"), makeCandidate("second", "second")},
+		func(context.Context, string, string) (*LLMResponse, error) {
+			calls++
+			response := &LLMResponse{FinishReason: "length"}
+			return response, ValidateLLMResponse(response)
+		},
+	)
 	if err == nil || calls != 2 {
 		t.Fatalf("calls=%d error=%v", calls, err)
 	}

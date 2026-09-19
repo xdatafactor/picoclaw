@@ -12,7 +12,12 @@ func TestAgentMaxTokensOverrideDoesNotChangeOtherAgents(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Agents.Defaults.MaxTokens = 8192
-	rodolfo := NewAgentInstance(&config.AgentConfig{ID: "rodolfo-rfreire", MaxTokens: 16384}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	rodolfo := NewAgentInstance(
+		&config.AgentConfig{ID: "rodolfo-rfreire", MaxTokens: 16384},
+		&cfg.Agents.Defaults,
+		cfg,
+		&mockProvider{},
+	)
 	defer rodolfo.Close()
 	other := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
 	defer other.Close()
@@ -22,11 +27,19 @@ func TestAgentMaxTokensOverrideDoesNotChangeOtherAgents(t *testing.T) {
 }
 
 func TestRodolfoAllEmptyProvidersReturnCustomerMessage(t *testing.T) {
-	provider := &sequenceProvider{responses: []*providers.LLMResponse{{ReasoningContent: "internal", FinishReason: "length"}, {FinishReason: "length"}}}
+	provider := &sequenceProvider{
+		responses: []*providers.LLMResponse{
+			{ReasoningContent: "internal", FinishReason: "length"},
+			{FinishReason: "length"},
+		},
+	}
 	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 	agent.ID = "rodolfo-rfreire"
-	agent.Candidates = []providers.FallbackCandidate{{Provider: "openai", Model: "primary"}, {Provider: "openai", Model: "secondary"}}
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "primary"},
+		{Provider: "openai", Model: "secondary"},
+	}
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 	opts := makeTestProcessOpts("empty-rodolfo")
 	opts.Channel = "whatsapp_native"
@@ -44,11 +57,19 @@ func TestRodolfoAllEmptyProvidersReturnCustomerMessage(t *testing.T) {
 }
 
 func TestRodolfoEmptyResponseUsesNextProvider(t *testing.T) {
-	provider := &sequenceProvider{responses: []*providers.LLMResponse{{ReasoningContent: "internal", FinishReason: "length"}, {Content: "Resposta recuperada", FinishReason: "stop"}}}
+	provider := &sequenceProvider{
+		responses: []*providers.LLMResponse{
+			{ReasoningContent: "internal", FinishReason: "length"},
+			{Content: "Resposta recuperada", FinishReason: "stop"},
+		},
+	}
 	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 	agent.ID = "rodolfo-rfreire"
-	agent.Candidates = []providers.FallbackCandidate{{Provider: "openai", Model: "primary"}, {Provider: "openai", Model: "secondary"}}
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "primary"},
+		{Provider: "openai", Model: "secondary"},
+	}
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 	opts := makeTestProcessOpts("recovered-rodolfo")
 	opts.Channel = "whatsapp_native"

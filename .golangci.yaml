@@ -86,6 +86,9 @@ linters:
       tab-width: 4
     misspell:
       locale: US
+      ignore-rules:
+        - comando
+        - operacional
     mnd:
       checks:
         - argument
