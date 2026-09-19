@@ -39,8 +39,12 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
+	currentTurnStart := len(messages)
+	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
+		currentTurnStart = len(messages) - 1
+	}
 
-	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize)
+	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize, currentTurnStart)
 
 	if !ts.opts.NoHistory {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
@@ -81,7 +85,11 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 					)
 					rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 					rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
-					return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize)
+					rebuiltCurrentTurnStart := len(rebuilt)
+					if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
+						rebuiltCurrentTurnStart = len(rebuilt) - 1
+					}
+					return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, rebuiltCurrentTurnStart)
 				},
 				ts.agent.ContextWindow,
 				toolDefs,
@@ -137,6 +145,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		summary,
 		messages,
 	)
+	exec.currentTurnStart = currentTurnStart
 	exec.activeCandidates = activeCandidates
 	exec.activeModel = activeModel
 	exec.activeModelConfig = resolveActiveModelConfig(

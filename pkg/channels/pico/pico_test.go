@@ -602,10 +602,12 @@ func TestBeginStream_FinalizeIncludesContextUsage(t *testing.T) {
 		t.Fatal("streamer should support FinalizeWithContext")
 	}
 	if err := contextStreamer.FinalizeWithContext(context.Background(), "final", &bus.ContextUsage{
-		UsedTokens:       10,
-		TotalTokens:      100,
-		CompressAtTokens: 80,
-		UsedPercent:      10,
+		UsedTokens:        10,
+		TotalTokens:       100,
+		HistoryTokens:     5,
+		CompressAtTokens:  80,
+		SummarizeAtTokens: 60,
+		UsedPercent:       10,
 	}); err != nil {
 		t.Fatalf("FinalizeWithContext() error = %v", err)
 	}
@@ -626,6 +628,12 @@ func TestBeginStream_FinalizeIncludesContextUsage(t *testing.T) {
 	}
 	if got := rawUsage["used_tokens"]; got != float64(10) {
 		t.Fatalf("used_tokens = %#v, want 10", got)
+	}
+	if got := rawUsage["history_tokens"]; got != float64(5) {
+		t.Fatalf("history_tokens = %#v, want 5", got)
+	}
+	if got := rawUsage["summarize_at_tokens"]; got != float64(60) {
+		t.Fatalf("summarize_at_tokens = %#v, want 60", got)
 	}
 }
 
@@ -832,6 +840,75 @@ func TestSendMedia_DismissesTrackedToolFeedbackMessage(t *testing.T) {
 	}
 	if _, ok := ch.currentToolFeedbackMessage("pico:sess-1"); ok {
 		t.Fatal("expected tracked tool feedback to be cleared after media delivery")
+	}
+}
+
+func TestSendMedia_IncludesCaptionAndAttachmentsInSinglePayload(t *testing.T) {
+	ch := newTestPicoChannel(t)
+	store := media.NewFileMediaStore()
+	ch.SetMediaStore(store)
+
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	localPath := filepath.Join(t.TempDir(), "photo.png")
+	if err := os.WriteFile(localPath, []byte("png-body"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	ref, err := store.Store(localPath, media.MediaMeta{
+		Filename:    "photo.png",
+		ContentType: "image/png",
+	}, "test-scope")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+
+	_, err = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+		ChatID: "pico:sess-1",
+		Parts: []bus.MediaPart{{
+			Ref:         ref,
+			Type:        "image",
+			Filename:    "photo.png",
+			ContentType: "image/png",
+			Caption:     "recipe translation",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SendMedia() error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeMessageCreate {
+			t.Fatalf("message type = %q, want %q", msg.Type, TypeMessageCreate)
+		}
+		payload := msg.Payload
+		if got := payload[PayloadKeyContent]; got != "recipe translation" {
+			t.Fatalf("content = %#v, want %q", got, "recipe translation")
+		}
+		rawAttachments, ok := payload["attachments"].([]any)
+		if !ok || len(rawAttachments) != 1 {
+			t.Fatalf("attachments = %#v, want 1 attachment", payload["attachments"])
+		}
+		attachment, ok := rawAttachments[0].(map[string]any)
+		if !ok {
+			t.Fatalf("attachment = %#v, want map", rawAttachments[0])
+		}
+		if got := attachment["type"]; got != "image" {
+			t.Fatalf("attachment type = %#v, want image", got)
+		}
+		if got := attachment["filename"]; got != "photo.png" {
+			t.Fatalf("attachment filename = %#v, want photo.png", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected media payload to be delivered")
 	}
 }
 

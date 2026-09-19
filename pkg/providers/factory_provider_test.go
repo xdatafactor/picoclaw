@@ -223,6 +223,7 @@ func TestCreateProviderFromConfig_DefaultAPIBase(t *testing.T) {
 	}{
 		{"openai", "openai"},
 		{"venice", "venice"},
+		{"nearai", "nearai"},
 		{"groq", "groq"},
 		{"novita", "novita"},
 		{"openrouter", "openrouter"},
@@ -285,6 +286,15 @@ func TestGetDefaultAPIBase_GPT4Free(t *testing.T) {
 func TestGetDefaultAPIBase_Venice(t *testing.T) {
 	if got := getDefaultAPIBase("venice"); got != "https://api.venice.ai/api/v1" {
 		t.Fatalf("getDefaultAPIBase(%q) = %q, want %q", "venice", got, "https://api.venice.ai/api/v1")
+	}
+}
+
+func TestGetDefaultAPIBase_NearAI(t *testing.T) {
+	if got := getDefaultAPIBase("nearai"); got != "https://cloud-api.near.ai/v1" {
+		t.Fatalf("getDefaultAPIBase(%q) = %q, want %q", "nearai", got, "https://cloud-api.near.ai/v1")
+	}
+	if got := getDefaultAPIBase("near-ai"); got != "https://cloud-api.near.ai/v1" {
+		t.Fatalf("getDefaultAPIBase(%q) = %q, want %q", "near-ai", got, "https://cloud-api.near.ai/v1")
 	}
 }
 
@@ -519,6 +529,28 @@ func TestCreateProviderFromConfig_Venice(t *testing.T) {
 	}
 	if modelID != "venice-uncensored" {
 		t.Errorf("modelID = %q, want %q", modelID, "venice-uncensored")
+	}
+	if _, ok := provider.(*HTTPProvider); !ok {
+		t.Fatalf("expected *HTTPProvider, got %T", provider)
+	}
+}
+
+func TestCreateProviderFromConfig_NearAI(t *testing.T) {
+	cfg := &config.ModelConfig{
+		ModelName: "test-nearai",
+		Model:     "nearai/zai-org/GLM-5.1-FP8",
+	}
+	cfg.SetAPIKey("test-key")
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProviderFromConfig() returned nil provider")
+	}
+	if modelID != "zai-org/GLM-5.1-FP8" {
+		t.Errorf("modelID = %q, want %q", modelID, "zai-org/GLM-5.1-FP8")
 	}
 	if _, ok := provider.(*HTTPProvider); !ok {
 		t.Fatalf("expected *HTTPProvider, got %T", provider)
@@ -870,8 +902,11 @@ func TestCreateProviderFromConfig_AzureMissingAPIKey(t *testing.T) {
 	}
 
 	_, _, err := CreateProviderFromConfig(cfg)
-	if err == nil {
-		t.Fatal("CreateProviderFromConfig() expected error for missing API key")
+	// Without api_key the factory falls back to identity auth, which in the
+	// default build is stubbed out and surfaces a build-tag error. With the
+	// azidentity tag, the call succeeds and is covered by a separate test.
+	if err != nil && !strings.Contains(err.Error(), "azidentity") {
+		t.Fatalf("CreateProviderFromConfig() unexpected error = %v", err)
 	}
 }
 
@@ -1073,10 +1108,41 @@ func TestModelProviderOptions(t *testing.T) {
 			"https://api.siliconflow.cn/v1",
 		)
 	}
+	if option, ok := seen["nearai"]; !ok {
+		t.Fatal("nearai option missing")
+	} else {
+		if option.DisplayName != "NEAR AI Cloud" {
+			t.Fatalf("nearai display_name = %q, want %q", option.DisplayName, "NEAR AI Cloud")
+		}
+		if option.DefaultAPIBase != "https://cloud-api.near.ai/v1" {
+			t.Fatalf("nearai default_api_base = %q, want %q", option.DefaultAPIBase, "https://cloud-api.near.ai/v1")
+		}
+		if !option.SupportsFetch {
+			t.Fatal("nearai should support upstream model listing")
+		}
+		if len(option.CommonModels) == 0 {
+			t.Fatal("nearai common_models should not be empty")
+		}
+	}
 	if option, ok := seen["anthropic"]; !ok {
 		t.Fatal("anthropic option missing")
 	} else if option.DefaultAPIBase != "https://api.anthropic.com/v1" {
 		t.Fatalf("anthropic default_api_base = %q, want %q", option.DefaultAPIBase, "https://api.anthropic.com/v1")
+	}
+	// First-party Claude API model IDs use hyphenated formats such as
+	// claude-{name}-{major}-{minor} or claude-{name}-{major}-{minor}-{YYYYMMDD};
+	// dotted provider prefixes are for platform-specific IDs such as Bedrock.
+	// https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+	for _, provider := range []string{"anthropic", "anthropic-messages"} {
+		option, ok := seen[provider]
+		if !ok {
+			t.Fatalf("%s option missing", provider)
+		}
+		for _, model := range option.CommonModels {
+			if strings.Contains(model, ".") {
+				t.Fatalf("%s common_model %q uses dotted ID", provider, model)
+			}
+		}
 	}
 	if _, ok := seen["azure"]; !ok {
 		t.Fatal("azure option missing")

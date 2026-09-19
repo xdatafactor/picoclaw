@@ -93,12 +93,15 @@
       "noModel": "Nenhum modelo padrão configurado. Vá para a página de Modelos para definir um."
     },
     "sendMessage": "Enviar mensagem",
-    "sendHint": "Pressione Enter para enviar\nShift + Enter para nova linha",
+    "composeHint": "Pressione Enter para enviar, Shift + Enter para nova linha",
     "contextTitle": "Contexto",
     "contextDetail": "Ver Detalhes",
+    "contextCompressAt": "Comprimir em",
+    "contextSummarizeAt": "Resumir em",
     "attachImage": "Adicionar imagens",
+    "dropImagesActive": "Solte para adicionar imagens",
     "removeImage": "Remover imagem",
-    "uploadedImage": "Imagem enviada",
+    "uploadedImage": "Imagem anexada",
     "invalidImage": "\"{{name}}\" não é um arquivo de imagem suportado.",
     "imageTooLarge": "\"{{name}}\" excede o limite de {{size}}.",
     "imageReadFailed": "Falha ao ler \"{{name}}\".",
@@ -250,17 +253,41 @@
     "action": {
       "edit": "Editar API Key",
       "setDefault": "Definir como padrão",
+      "addToFallback": "Adicionar à cadeia de fallback",
+      "removeFromFallback": "Remover da cadeia de fallback",
       "delete": "Excluir modelo",
       "setDefaultDisabled": {
-        "setting": "Definindo como padrão...",
         "unavailable": "Não é possível definir um modelo indisponível como padrão",
         "isDefault": "Já é o modelo padrão",
         "isVirtual": "Não é possível definir um modelo virtual como padrão",
         "unsupportedProvider": "Este provedor não pode ser usado como modelo de chat padrão."
       },
+      "addToFallbackDisabled": {
+        "isDefault": "O modelo padrão não pode ser adicionado à cadeia de fallback"
+      },
       "deleteDisabled": {
         "isDefault": "Não é possível excluir o modelo padrão"
       }
+    },
+    "defaultChain": {
+      "button": "Cadeia de Fallback",
+      "title": "Modelo padrão e cadeia de fallback",
+      "manage": "Gerenciar cadeia",
+      "summary_one": "{{model}} com {{count}} fallback",
+      "summary_other": "{{model}} com {{count}} fallbacks",
+      "noDefault": "Nenhum modelo padrão selecionado ainda.",
+      "dialogTitle": "Editar cadeia de fallback",
+      "dialogDescription": "Revise e reordene os modelos de fallback usados após falha do modelo padrão.",
+      "defaultModel": "Modelo padrão",
+      "fallbackChain": "Cadeia de fallback",
+      "empty": "Nenhum modelo de fallback adicionado ainda. Use os cartões de modelo para adicionar backups.",
+      "moveTop": "Mover para o topo",
+      "moveUp": "Mover para cima",
+      "moveDown": "Mover para baixo",
+      "moveBottom": "Mover para o fim",
+      "remove": "Remover da cadeia",
+      "saveSuccess": "Cadeia de modelo padrão salva.",
+      "unsaved": "O modelo padrão ou a cadeia de fallback foi alterado. Salve para aplicar a cadeia atualizada."
     },
     "defaultOnSave": {
       "label": "Modelo Padrão",
@@ -847,6 +874,11 @@
       "allowed_cidrs": "CIDRs de Rede Permitidos",
       "allowed_cidrs_hint": "Apenas clientes destes intervalos CIDR podem acessar o serviço. Um por linha ou separados por vírgula. Deixe vazio para permitir todos.",
       "allowed_cidrs_placeholder": "192.168.1.0/24\n10.0.0.0/8",
+      "allow_localhost_bypass": "Permitir Bypass por Localhost",
+      "allow_localhost_bypass_hint": "Quando habilitado, requisições localhost são permitidas mesmo sem corresponder aos CIDRs permitidos. Desabilite quando o launcher estiver atrás de um proxy no mesmo host.",
+      "trusted_proxy_cidrs": "CIDRs de Proxy Confiáveis",
+      "trusted_proxy_cidrs_hint": "Apenas proxies destes intervalos CIDR podem informar dados do IP do cliente, como X-Forwarded-For. Deixe vazio para ignorar cabeçalhos de IP do cliente vindos de proxy.",
+      "trusted_proxy_cidrs_placeholder": "172.16.0.0/12\n127.0.0.1/32",
       "evolution_section_hint": "Permite que o agente aprenda com turnos concluídos e prepare melhorias de skills.",
       "evolution_enabled": "Habilitar Evolução",
       "evolution_enabled_hint": "Registrar dados de aprendizado para turnos concluídos. Os modos Draft e Apply também podem gerar atualizações de skills.",

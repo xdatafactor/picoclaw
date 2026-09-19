@@ -31,6 +31,22 @@ func toolErrorSummary(result *tools.ToolResult) string {
 	return utils.Truncate(content, 200)
 }
 
+// additiveMediaSteering reports whether every queued steering message carries
+// media. File uploads are additive to the active request: they should be
+// injected after the current tool batch, but must not cancel another file from
+// that same batch. Text-only steering keeps the existing interrupt semantics.
+func additiveMediaSteering(messages []providers.Message) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	for _, message := range messages {
+		if len(message.Media) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func inferSkillNamesFromToolCall(ts *turnState, toolName string, toolArgs map[string]any) []string {
 	if ts == nil || toolName != "read_file" {
 		return nil
@@ -295,21 +311,16 @@ toolLoop:
 						contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
 					}
 
-					toolResultMsg := providers.Message{
-						Role:       "tool",
-						Content:    contentForLLM,
-						ToolCallID: tc.ID,
-					}
-
+					var toolResultMedia []string
 					if len(hookResult.Media) > 0 && !hookResult.ResponseHandled {
 						hookResult.ArtifactTags = buildArtifactTags(al.mediaStore, hookResult.Media)
 						contentForLLM = hookResult.ContentForLLM()
 						if al.cfg.Tools.IsFilterSensitiveDataEnabled() {
 							contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
 						}
-						toolResultMsg.Content = contentForLLM
-						toolResultMsg.Media = append(toolResultMsg.Media, hookResult.Media...)
+						toolResultMedia = append(toolResultMedia, hookResult.Media...)
 					}
+					toolResultMsg := toolResultPromptMessage(contentForLLM, tc.ID, toolResultMedia)
 
 					al.emitEvent(
 						runtimeevents.KindAgentToolExecEnd,
@@ -343,7 +354,7 @@ toolLoop:
 
 					skipReason := ""
 					skipMessage := ""
-					if len(exec.pendingMessages) > 0 {
+					if len(exec.pendingMessages) > 0 && !additiveMediaSteering(exec.pendingMessages) {
 						skipReason = "queued user steering message"
 						skipMessage = "Skipped due to queued user message."
 					} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
@@ -695,14 +706,11 @@ toolLoop:
 			contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
 		}
 
-		toolResultMsg := providers.Message{
-			Role:       "tool",
-			Content:    contentForLLM,
-			ToolCallID: toolCallID,
-		}
+		var toolResultMedia []string
 		if len(toolResult.Media) > 0 && !toolResult.ResponseHandled {
-			toolResultMsg.Media = append(toolResultMsg.Media, toolResult.Media...)
+			toolResultMedia = append(toolResultMedia, toolResult.Media...)
 		}
+		toolResultMsg := toolResultPromptMessage(contentForLLM, toolCallID, toolResultMedia)
 		al.emitEvent(
 			runtimeevents.KindAgentToolExecEnd,
 			ts.eventMeta("runTurn", "turn.tool.end"),
@@ -734,7 +742,7 @@ toolLoop:
 
 		skipReason := ""
 		skipMessage := ""
-		if len(exec.pendingMessages) > 0 {
+		if len(exec.pendingMessages) > 0 && !additiveMediaSteering(exec.pendingMessages) {
 			skipReason = "queued user steering message"
 			skipMessage = "Skipped due to queued user message."
 		} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {

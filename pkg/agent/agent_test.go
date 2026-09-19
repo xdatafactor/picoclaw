@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,6 +119,31 @@ func newStartedTestChannelManager(
 type recordingProvider struct {
 	lastMessages []providers.Message
 	lastModel    string
+}
+
+type panicAfterStartProvider struct {
+	started chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *panicAfterStartProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls.Add(1)
+	select {
+	case <-p.started:
+	default:
+		close(p.started)
+	}
+	panic("provider panic after turn registration")
+}
+
+func (p *panicAfterStartProvider) GetDefaultModel() string {
+	return "panic-after-start"
 }
 
 func (r *recordingProvider) Chat(
@@ -258,6 +284,24 @@ type modelRewriteHook struct {
 	model string
 }
 
+type clearOptionsHook struct{}
+
+func (clearOptionsHook) BeforeLLM(
+	ctx context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	next := req.Clone()
+	next.Options = nil
+	return next, HookDecision{Action: HookActionModify}, nil
+}
+
+func (clearOptionsHook) AfterLLM(
+	ctx context.Context,
+	resp *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	return resp.Clone(), HookDecision{Action: HookActionContinue}, nil
+}
+
 func (h modelRewriteHook) BeforeLLM(
 	ctx context.Context,
 	req *LLMHookRequest,
@@ -377,7 +421,11 @@ func TestPublishResponseIfNeeded_DismissesToolFeedbackWhenMessageToolAlreadySent
 		t.Fatal("expected default agent")
 	}
 	mt := tools.NewMessageTool()
-	mt.SetSendCallback(func(ctx context.Context, channel, chatID, content, replyToMessageID string) error {
+	mt.SetSendCallback(func(
+		ctx context.Context,
+		channel, chatID, content, replyToMessageID string,
+		mediaParts []bus.MediaPart,
+	) error {
 		return nil
 	})
 	defaultAgent.Tools.Register(mt)
@@ -3335,6 +3383,105 @@ func TestProcessMessage_CommandOutcomes(t *testing.T) {
 	}
 }
 
+func TestProcessMessage_ClearCommandClearsRoutedAgentSession(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         filepath.Join(workspace, "default"),
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+			List: []config.AgentConfig{
+				{
+					ID:        "main",
+					Default:   true,
+					Workspace: filepath.Join(workspace, "main"),
+				},
+				{
+					ID:        "support",
+					Workspace: filepath.Join(workspace, "support"),
+				},
+			},
+			Dispatch: &config.DispatchConfig{
+				Rules: []config.DispatchRule{
+					{
+						Name:  "support-dingtalk",
+						Agent: "support",
+						When: config.DispatchSelector{
+							Channel: "dingtalk",
+						},
+					},
+				},
+			},
+		},
+		Session: config.SessionConfig{
+			Dimensions: []string{"chat"},
+		},
+	}
+
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &countingMockProvider{response: "LLM reply"})
+	mainAgent, ok := al.registry.GetAgent("main")
+	if !ok {
+		t.Fatal("expected main agent")
+	}
+	supportAgent, ok := al.registry.GetAgent("support")
+	if !ok {
+		t.Fatal("expected support agent")
+	}
+
+	msg := testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "dingtalk",
+			ChatID:   "chat1",
+			ChatType: "direct",
+			SenderID: "user1",
+		},
+		Content: "/clear",
+	})
+	route, routedAgent, err := al.resolveMessageRoute(msg)
+	if err != nil {
+		t.Fatalf("resolveMessageRoute() error = %v", err)
+	}
+	if routedAgent != supportAgent {
+		t.Fatalf("routed agent = %s, want support", routedAgent.ID)
+	}
+	sessionKey := al.allocateRouteSession(route, msg).SessionKey
+
+	mainHistory := []providers.Message{{Role: "user", Content: "main history"}}
+	supportHistory := []providers.Message{{Role: "user", Content: "support history"}}
+	mainAgent.Sessions.SetHistory(sessionKey, mainHistory)
+	mainAgent.Sessions.SetSummary(sessionKey, "main summary")
+	supportAgent.Sessions.SetHistory(sessionKey, supportHistory)
+	supportAgent.Sessions.SetSummary(sessionKey, "support summary")
+
+	response, err := al.processMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "Chat history cleared!" {
+		t.Fatalf("response = %q, want clear confirmation", response)
+	}
+
+	if got := supportAgent.Sessions.GetHistory(sessionKey); len(got) != 0 {
+		t.Fatalf("support history len = %d, want 0", len(got))
+	}
+	if got := supportAgent.Sessions.GetSummary(sessionKey); got != "" {
+		t.Fatalf("support summary = %q, want empty", got)
+	}
+	if got := mainAgent.Sessions.GetHistory(sessionKey); len(got) != len(mainHistory) {
+		t.Fatalf("main history len = %d, want %d", len(got), len(mainHistory))
+	} else if got[0].Role != mainHistory[0].Role {
+		t.Fatalf("main history[0].Role = %q, want %q", got[0].Role, mainHistory[0].Role)
+	} else if got[0].Content != mainHistory[0].Content {
+		t.Fatalf("main history[0].Content = %q, want %q", got[0].Content, mainHistory[0].Content)
+	}
+	if got := mainAgent.Sessions.GetSummary(sessionKey); got != "main summary" {
+		t.Fatalf("main summary = %q, want %q", got, "main summary")
+	}
+}
+
 func TestProcessMessage_MCPCommandsHandledWithoutLLMCall(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -3564,6 +3711,12 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 				APIBase:   remoteServer.URL,
 				APIKeys:   config.SimpleSecureStrings("remote-key"),
 			},
+			{
+				ModelName: "deepseek",
+				Model:     "openrouter/deepseek/deepseek-v3.2",
+				APIBase:   remoteServer.URL,
+				APIKeys:   config.SimpleSecureStrings("remote-key-secondary"),
+			},
 		},
 	}
 
@@ -3603,6 +3756,12 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	if !strings.Contains(switchResp, "Switched model from local to deepseek") {
 		t.Fatalf("unexpected /switch reply: %q", switchResp)
 	}
+	agent := al.registry.GetDefaultAgent()
+	for _, candidate := range agent.Candidates[1:] {
+		if agent.CandidateProviders[candidateProviderKey(candidate)] == nil {
+			t.Fatalf("candidate provider %q was not initialized after model switch", candidate.DisplayName)
+		}
+	}
 
 	secondResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
 		Channel:  "telegram",
@@ -3624,6 +3783,71 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 			"remote model after switch = %q, want %q",
 			remoteModel,
 			"deepseek-v3.2",
+		)
+	}
+}
+
+func TestProcessMessage_SwitchModelPreservesPrimaryProviderFallbackInheritance(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				Provider:          "openai",
+				ModelName:         "first",
+				ModelFallbacks:    []string{"fallback"},
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "first",
+				Provider:  "openai",
+				Model:     "first",
+				APIKeys:   config.SimpleSecureStrings("sk-first"),
+			},
+			{
+				ModelName: "second",
+				Provider:  "openai",
+				Model:     "second",
+				APIKeys:   config.SimpleSecureStrings("sk-second"),
+			},
+			{
+				ModelName: "fallback",
+				Provider:  "openai",
+				Model:     "fallback",
+			},
+		},
+	}
+
+	provider, _, err := providers.CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	helper := testHelper{al: al}
+
+	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/switch model to second",
+	})
+	if !strings.Contains(switchResp, "Switched model from first to second") {
+		t.Fatalf("unexpected /switch reply: %q", switchResp)
+	}
+
+	agent := al.registry.GetDefaultAgent()
+	if len(agent.Candidates) != 2 {
+		t.Fatalf("len(agent.Candidates) = %d, want 2", len(agent.Candidates))
+	}
+	fallbackProvider := agent.CandidateProviders[candidateProviderKey(agent.Candidates[1])]
+	if fallbackProvider != agent.Provider {
+		t.Fatalf(
+			"fallback provider = %T, want switched primary provider %T",
+			fallbackProvider,
+			agent.Provider,
 		)
 	}
 }
@@ -4397,7 +4621,250 @@ func (p *visionUnsupportedMediaProvider) GetDefaultModel() string {
 	return "mock-fail-model"
 }
 
-func TestAgentLoop_VisionUnsupportedErrorStripsSessionMedia(t *testing.T) {
+type loadImagePlanningProvider struct {
+	path        string
+	followUpErr error
+	calls       int
+	models      []string
+}
+
+func (p *loadImagePlanningProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.models = append(p.models, model)
+
+	if p.calls == 1 {
+		return &providers.LLMResponse{
+			Content: "Let me inspect the image.",
+			ToolCalls: []providers.ToolCall{{
+				ID:        "call_load_image_test",
+				Type:      "function",
+				Name:      "load_image",
+				Arguments: map[string]any{"path": p.path},
+			}},
+		}, nil
+	}
+
+	if p.followUpErr != nil {
+		return nil, p.followUpErr
+	}
+
+	return nil, fmt.Errorf("load_image follow-up should not be handled by the text model")
+}
+
+func (p *loadImagePlanningProvider) GetDefaultModel() string {
+	return "load-image-planner"
+}
+
+type visionAnswerProvider struct {
+	calls     int
+	models    []string
+	mediaSeen []bool
+}
+
+func (p *visionAnswerProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.models = append(p.models, model)
+
+	hasMedia := false
+	for _, msg := range messages {
+		for _, ref := range msg.Media {
+			if strings.TrimSpace(ref) != "" {
+				hasMedia = true
+				break
+			}
+		}
+		if hasMedia {
+			break
+		}
+	}
+	p.mediaSeen = append(p.mediaSeen, hasMedia)
+	if !hasMedia {
+		return nil, fmt.Errorf("vision provider expected image media in follow-up request")
+	}
+
+	return &providers.LLMResponse{
+		Content:   "vision answer",
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (p *visionAnswerProvider) GetDefaultModel() string {
+	return "vision-answer-model"
+}
+
+type resolvedImagePathVisionProvider struct {
+	expectedPath string
+	calls        int
+	models       []string
+	pathTagSeen  []bool
+	mediaSeen    []bool
+}
+
+func (p *resolvedImagePathVisionProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.models = append(p.models, model)
+
+	pathTag := "[image:" + p.expectedPath + "]"
+	hasPathTag := false
+	hasMedia := false
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, pathTag) {
+			hasPathTag = true
+		}
+		for _, ref := range msg.Media {
+			if strings.TrimSpace(ref) != "" {
+				hasMedia = true
+				break
+			}
+		}
+	}
+	p.pathTagSeen = append(p.pathTagSeen, hasPathTag)
+	p.mediaSeen = append(p.mediaSeen, hasMedia)
+
+	if !hasPathTag {
+		return nil, fmt.Errorf("vision provider expected resolved image path tag %q", pathTag)
+	}
+	if hasMedia {
+		return nil, fmt.Errorf("vision provider expected resolved attachment turn without raw media refs")
+	}
+
+	return &providers.LLMResponse{
+		Content:   "vision direct answer",
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (p *resolvedImagePathVisionProvider) GetDefaultModel() string {
+	return "resolved-image-path-vision-model"
+}
+
+type unexpectedTextAttachmentProvider struct {
+	calls int
+}
+
+func (p *unexpectedTextAttachmentProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	return &providers.LLMResponse{
+		Content:   "text model response",
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (p *unexpectedTextAttachmentProvider) GetDefaultModel() string {
+	return "unexpected-text-attachment-model"
+}
+
+type unexpectedVisionProvider struct {
+	calls  int
+	models []string
+}
+
+func (p *unexpectedVisionProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.models = append(p.models, model)
+	return nil, fmt.Errorf("vision provider should not be called for this turn")
+}
+
+func (p *unexpectedVisionProvider) GetDefaultModel() string {
+	return "unexpected-vision-model"
+}
+
+type loadImageThenTextFollowUpProvider struct {
+	path             string
+	calls            int
+	models           []string
+	mediaSeen        []bool
+	syntheticMsgSeen []bool
+}
+
+func (p *loadImageThenTextFollowUpProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	p.models = append(p.models, model)
+
+	hasMedia := false
+	hasSynthetic := false
+	for _, msg := range messages {
+		if msg.Content == "[Loaded image from tool result above]" {
+			hasSynthetic = true
+		}
+		for _, ref := range msg.Media {
+			if strings.TrimSpace(ref) != "" {
+				hasMedia = true
+				break
+			}
+		}
+	}
+	p.mediaSeen = append(p.mediaSeen, hasMedia)
+	p.syntheticMsgSeen = append(p.syntheticMsgSeen, hasSynthetic)
+
+	switch p.calls {
+	case 1:
+		return &providers.LLMResponse{
+			Content: "Let me inspect the image.",
+			ToolCalls: []providers.ToolCall{{
+				ID:        "call_load_image_regression",
+				Type:      "function",
+				Name:      "load_image",
+				Arguments: map[string]any{"path": p.path},
+			}},
+		}, nil
+	case 2:
+		if hasMedia {
+			return nil, fmt.Errorf("text-only follow-up unexpectedly retained media from prior turn")
+		}
+		if hasSynthetic {
+			return nil, fmt.Errorf("text-only follow-up unexpectedly rebuilt synthetic tool image message from history")
+		}
+		return &providers.LLMResponse{
+			Content:   "text follow-up",
+			ToolCalls: []providers.ToolCall{},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unexpected extra text-model call %d", p.calls)
+	}
+}
+
+func (p *loadImageThenTextFollowUpProvider) GetDefaultModel() string {
+	return "load-image-then-text-follow-up-model"
+}
+
+func TestAgentLoop_VisionUnsupportedErrorReturnsClearFailure(t *testing.T) {
 	workspace := t.TempDir()
 
 	cfg := &config.Config{
@@ -4432,17 +4899,20 @@ func TestAgentLoop_VisionUnsupportedErrorStripsSessionMedia(t *testing.T) {
 		Media:      []string{"data:image/png;base64,abc123"},
 		SessionKey: sessionKey,
 	}))
-	if err != nil {
-		t.Fatalf("processMessage() error = %v", err)
+	if err == nil {
+		t.Fatal("processMessage() error = nil, want vision unsupported failure")
 	}
-	if resp != "ok" {
-		t.Fatalf("response = %q, want %q", resp, "ok")
+	if resp != "" {
+		t.Fatalf("response = %q, want empty response on error", resp)
 	}
-	if provider.calls != 2 {
-		t.Fatalf("calls = %d, want %d (fail with media, then retry without media)", provider.calls, 2)
+	if !strings.Contains(err.Error(), `active model "test-model" does not support image input`) {
+		t.Fatalf("error = %q, want clear vision unsupported guidance", err.Error())
 	}
-	if !slices.Equal(provider.mediaSeen, []bool{true, false}) {
-		t.Fatalf("mediaSeen = %v, want %v", provider.mediaSeen, []bool{true, false})
+	if provider.calls != 1 {
+		t.Fatalf("calls = %d, want %d (no retry without media)", provider.calls, 1)
+	}
+	if !slices.Equal(provider.mediaSeen, []bool{true}) {
+		t.Fatalf("mediaSeen = %v, want %v", provider.mediaSeen, []bool{true})
 	}
 
 	agent := al.registry.GetDefaultAgent()
@@ -4450,10 +4920,172 @@ func TestAgentLoop_VisionUnsupportedErrorStripsSessionMedia(t *testing.T) {
 		t.Fatal("expected default agent")
 	}
 	history := agent.Sessions.GetHistory(sessionKey)
-	for i, msg := range history {
-		if len(msg.Media) > 0 {
-			t.Fatalf("history[%d].Media = %v, want no media after stripping", i, msg.Media)
-		}
+	if len(history) == 0 {
+		t.Fatal("expected user message to remain in session history")
+	}
+	if len(history[0].Media) == 0 {
+		t.Fatalf("history[0].Media = %v, want original media preserved", history[0].Media)
+	}
+}
+
+func TestAgentLoop_UserAttachmentRoutesToImageModelAfterMediaResolution(t *testing.T) {
+	workspace := t.TempDir()
+	pngPath := filepath.Join(workspace, "sample.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				ImageModel:        "vision-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+			{ModelName: "vision-model", Model: "openai/vision-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	textProvider := &unexpectedTextAttachmentProvider{}
+	al := NewAgentLoop(cfg, msgBus, textProvider)
+
+	store := media.NewFileMediaStore()
+	al.SetMediaStore(store)
+	ref, err := store.Store(pngPath, media.MediaMeta{ContentType: "image/png"}, "test:user-attachment")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+	if len(agent.ImageCandidates) != 1 {
+		t.Fatalf("len(ImageCandidates) = %d, want 1", len(agent.ImageCandidates))
+	}
+
+	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "describe this image",
+		Media:      []string{ref},
+		SessionKey: "agent:main:telegram:direct:user1",
+	}))
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if resp != "vision direct answer" {
+		t.Fatalf("response = %q, want %q", resp, "vision direct answer")
+	}
+	if textProvider.calls != 0 {
+		t.Fatalf("textProvider calls = %d, want 0", textProvider.calls)
+	}
+	if visionProvider.calls != 1 {
+		t.Fatalf("visionProvider calls = %d, want %d", visionProvider.calls, 1)
+	}
+	if !slices.Equal(visionProvider.models, []string{"vision-model"}) {
+		t.Fatalf("visionProvider models = %v, want %v", visionProvider.models, []string{"vision-model"})
+	}
+	if !slices.Equal(visionProvider.pathTagSeen, []bool{true}) {
+		t.Fatalf("visionProvider pathTagSeen = %v, want %v", visionProvider.pathTagSeen, []bool{true})
+	}
+	if !slices.Equal(visionProvider.mediaSeen, []bool{false}) {
+		t.Fatalf("visionProvider mediaSeen = %v, want %v", visionProvider.mediaSeen, []bool{false})
+	}
+}
+
+func TestAgentLoop_TextFollowUpAfterUserAttachmentStaysOnTextModel(t *testing.T) {
+	workspace := t.TempDir()
+	pngPath := filepath.Join(workspace, "sample.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				ImageModel:        "vision-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+			{ModelName: "vision-model", Model: "openai/vision-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	textProvider := &unexpectedTextAttachmentProvider{}
+	al := NewAgentLoop(cfg, msgBus, textProvider)
+
+	store := media.NewFileMediaStore()
+	al.SetMediaStore(store)
+	ref, err := store.Store(pngPath, media.MediaMeta{ContentType: "image/png"}, "test:user-attachment-followup")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+
+	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
+
+	sessionKey := "agent:main:telegram:direct:user1"
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp1, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "describe this image",
+		Media:      []string{ref},
+		SessionKey: sessionKey,
+	}))
+	if err != nil {
+		t.Fatalf("first processMessage() error = %v", err)
+	}
+	if resp1 != "vision direct answer" {
+		t.Fatalf("first response = %q, want %q", resp1, "vision direct answer")
 	}
 
 	timeoutCtx2, cancel2 := context.WithTimeout(context.Background(), responseTimeout)
@@ -4467,20 +5099,336 @@ func TestAgentLoop_VisionUnsupportedErrorStripsSessionMedia(t *testing.T) {
 			SenderID:  "user1",
 			MessageID: "m2",
 		},
-		Content:    "hello again",
+		Content:    "now summarize it in one sentence",
 		SessionKey: sessionKey,
 	}))
 	if err != nil {
-		t.Fatalf("processMessage() second call error = %v", err)
+		t.Fatalf("second processMessage() error = %v", err)
 	}
-	if resp2 != "ok" {
-		t.Fatalf("second response = %q, want %q", resp2, "ok")
+	if resp2 != "text model response" {
+		t.Fatalf("second response = %q, want %q", resp2, "text model response")
 	}
-	if provider.calls != 3 {
-		t.Fatalf("calls after second turn = %d, want %d", provider.calls, 3)
+	if textProvider.calls != 1 {
+		t.Fatalf("textProvider calls = %d, want 1", textProvider.calls)
 	}
-	if !slices.Equal(provider.mediaSeen, []bool{true, false, false}) {
-		t.Fatalf("mediaSeen = %v, want %v", provider.mediaSeen, []bool{true, false, false})
+	if visionProvider.calls != 1 {
+		t.Fatalf("visionProvider calls = %d, want 1", visionProvider.calls)
+	}
+}
+
+func TestAgentLoop_GenericImagePlaceholderDoesNotRouteToImageModel(t *testing.T) {
+	workspace := t.TempDir()
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				ImageModel:        "vision-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+			{ModelName: "vision-model", Model: "openai/vision-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	textProvider := &unexpectedTextAttachmentProvider{}
+	al := NewAgentLoop(cfg, msgBus, textProvider)
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+
+	visionProvider := &unexpectedVisionProvider{}
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "this is only a placeholder [image: photo], answer in text",
+		SessionKey: "agent:main:telegram:direct:user1",
+	}))
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if resp != "text model response" {
+		t.Fatalf("response = %q, want %q", resp, "text model response")
+	}
+	if textProvider.calls != 1 {
+		t.Fatalf("textProvider calls = %d, want 1", textProvider.calls)
+	}
+	if visionProvider.calls != 0 {
+		t.Fatalf("visionProvider calls = %d, want 0", visionProvider.calls)
+	}
+}
+
+func TestAgentLoop_TextFollowUpAfterLoadImageStaysOnTextModel(t *testing.T) {
+	workspace := t.TempDir()
+	pngPath := filepath.Join(workspace, "sample.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				ImageModel:        "vision-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		Tools: config.ToolsConfig{
+			LoadImage: config.ToolConfig{Enabled: true},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+			{ModelName: "vision-model", Model: "openai/vision-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	textProvider := &loadImageThenTextFollowUpProvider{path: pngPath}
+	al := NewAgentLoop(cfg, msgBus, textProvider)
+	al.SetMediaStore(media.NewFileMediaStore())
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+	if len(agent.ImageCandidates) != 1 {
+		t.Fatalf("len(ImageCandidates) = %d, want 1", len(agent.ImageCandidates))
+	}
+
+	visionProvider := &visionAnswerProvider{}
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
+
+	sessionKey := "agent:main:telegram:direct:user1"
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp1, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "describe the image you load",
+		SessionKey: sessionKey,
+	}))
+	if err != nil {
+		t.Fatalf("first processMessage() error = %v", err)
+	}
+	if resp1 != "vision answer" {
+		t.Fatalf("first response = %q, want %q", resp1, "vision answer")
+	}
+
+	timeoutCtx2, cancel2 := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel2()
+
+	resp2, err := al.processMessage(timeoutCtx2, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m2",
+		},
+		Content:    "now summarize it in one sentence",
+		SessionKey: sessionKey,
+	}))
+	if err != nil {
+		t.Fatalf("second processMessage() error = %v", err)
+	}
+	if resp2 != "text follow-up" {
+		t.Fatalf("second response = %q, want %q", resp2, "text follow-up")
+	}
+	if textProvider.calls != 2 {
+		t.Fatalf("textProvider calls = %d, want %d", textProvider.calls, 2)
+	}
+	if !slices.Equal(textProvider.models, []string{"text-model", "text-model"}) {
+		t.Fatalf("textProvider models = %v, want %v", textProvider.models, []string{"text-model", "text-model"})
+	}
+	if !slices.Equal(textProvider.mediaSeen, []bool{false, false}) {
+		t.Fatalf("textProvider mediaSeen = %v, want %v", textProvider.mediaSeen, []bool{false, false})
+	}
+	if !slices.Equal(textProvider.syntheticMsgSeen, []bool{false, false}) {
+		t.Fatalf("textProvider syntheticMsgSeen = %v, want %v", textProvider.syntheticMsgSeen, []bool{false, false})
+	}
+	if visionProvider.calls != 1 {
+		t.Fatalf("visionProvider calls = %d, want %d", visionProvider.calls, 1)
+	}
+}
+
+func TestAgentLoop_LoadImageFollowUpRoutesToImageModel(t *testing.T) {
+	workspace := t.TempDir()
+	pngPath := filepath.Join(workspace, "sample.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				ImageModel:        "vision-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		Tools: config.ToolsConfig{
+			LoadImage: config.ToolConfig{Enabled: true},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+			{ModelName: "vision-model", Model: "openai/vision-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	planner := &loadImagePlanningProvider{path: pngPath}
+	al := NewAgentLoop(cfg, msgBus, planner)
+	al.SetMediaStore(media.NewFileMediaStore())
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+	if len(agent.ImageCandidates) != 1 {
+		t.Fatalf("len(ImageCandidates) = %d, want 1", len(agent.ImageCandidates))
+	}
+
+	visionProvider := &visionAnswerProvider{}
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "describe the image you load",
+		SessionKey: "agent:main:telegram:direct:user1",
+	}))
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if resp != "vision answer" {
+		t.Fatalf("response = %q, want %q", resp, "vision answer")
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls = %d, want %d", planner.calls, 1)
+	}
+	if visionProvider.calls != 1 {
+		t.Fatalf("visionProvider calls = %d, want %d", visionProvider.calls, 1)
+	}
+	if !slices.Equal(visionProvider.models, []string{"vision-model"}) {
+		t.Fatalf("visionProvider models = %v, want %v", visionProvider.models, []string{"vision-model"})
+	}
+	if !slices.Equal(visionProvider.mediaSeen, []bool{true}) {
+		t.Fatalf("visionProvider mediaSeen = %v, want %v", visionProvider.mediaSeen, []bool{true})
+	}
+}
+
+func TestAgentLoop_LoadImageFollowUpWithoutImageModelFailsClearly(t *testing.T) {
+	workspace := t.TempDir()
+	pngPath := filepath.Join(workspace, "sample.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "text-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		Tools: config.ToolsConfig{
+			LoadImage: config.ToolConfig{Enabled: true},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "text-model", Model: "openai/text-model"},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	planner := &loadImagePlanningProvider{
+		path: pngPath,
+		followUpErr: fmt.Errorf(
+			`API request failed: Status: 404 Body: {"error":{"message":"No endpoints found that support image input"}}`,
+		),
+	}
+	al := NewAgentLoop(cfg, msgBus, planner)
+	al.SetMediaStore(media.NewFileMediaStore())
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	resp, err := al.processMessage(timeoutCtx, testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:   "telegram",
+			ChatID:    "chat1",
+			ChatType:  "direct",
+			SenderID:  "user1",
+			MessageID: "m1",
+		},
+		Content:    "describe the image you load",
+		SessionKey: "agent:main:telegram:direct:user1",
+	}))
+	if err == nil {
+		t.Fatal("processMessage() error = nil, want vision unsupported failure")
+	}
+	if resp != "" {
+		t.Fatalf("response = %q, want empty response on error", resp)
+	}
+	if !strings.Contains(err.Error(), `active model "text-model" does not support image input`) {
+		t.Fatalf("error = %q, want clear vision unsupported guidance", err.Error())
+	}
+	if planner.calls != 2 {
+		t.Fatalf("planner calls = %d, want %d", planner.calls, 2)
 	}
 }
 
@@ -5363,6 +6311,61 @@ func TestProcessMessage_DoesNotLeakReasoningContentInToolFeedback(t *testing.T) 
 	}
 }
 
+func TestProcessMessage_DoesNotPublishToolFeedbackForWhatsApp(t *testing.T) {
+	for _, channel := range []string{config.ChannelWhatsApp, config.ChannelWhatsAppNative} {
+		t.Run(channel, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			heartbeatFile := filepath.Join(tmpDir, "tool-feedback-whatsapp.txt")
+			if err := os.WriteFile(heartbeatFile, []byte("tool feedback task"), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			cfg := &config.Config{
+				Agents: config.AgentsConfig{
+					Defaults: config.AgentDefaults{
+						Workspace:         tmpDir,
+						ModelName:         "test-model",
+						MaxTokens:         4096,
+						MaxToolIterations: 10,
+						ToolFeedback: config.ToolFeedbackConfig{
+							Enabled:       true,
+							MaxArgsLength: 300,
+						},
+					},
+				},
+				Tools: config.ToolsConfig{
+					ReadFile: config.ReadFileToolConfig{
+						Enabled: true,
+					},
+				},
+			}
+
+			msgBus := bus.NewMessageBus()
+			provider := &toolFeedbackProvider{filePath: heartbeatFile}
+			al := NewAgentLoop(cfg, msgBus, provider)
+
+			response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
+				Channel:  channel,
+				SenderID: "user-1",
+				ChatID:   "chat-1",
+				Content:  "check tool feedback",
+			}))
+			if err != nil {
+				t.Fatalf("processMessage() error = %v", err)
+			}
+			if response != "HEARTBEAT_OK" {
+				t.Fatalf("processMessage() response = %q, want %q", response, "HEARTBEAT_OK")
+			}
+
+			select {
+			case outbound := <-msgBus.OutboundChan():
+				t.Fatalf("expected no outbound tool feedback for %s, got %+v", channel, outbound)
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestProcessMessage_DoesNotPublishToolFeedbackForDiscordWhenDisabled(t *testing.T) {
 	assertToolFeedbackNotPublishedWhenDisabled(t, "discord")
 }
@@ -5715,7 +6718,7 @@ func TestResolveMediaRefs_ImageInjectsPathTag(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "describe this", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media (images use path tags), got %d", len(result[0].Media))
@@ -5746,9 +6749,9 @@ func TestResolveMediaRefs_ToolRoleImageAppendedAsUserMessage(t *testing.T) {
 	ref, _ := store.Store(pngPath, media.MediaMeta{}, "test")
 
 	messages := []providers.Message{
-		{Role: "tool", Content: "Image loaded", Media: []string{ref}},
+		toolResultPromptMessage("Image loaded", "call_tool_result_image", []string{ref}),
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	// Tool message should have path tag but no base64
 	if len(result[0].Media) != 0 {
@@ -5774,6 +6777,106 @@ func TestResolveMediaRefs_ToolRoleImageAppendedAsUserMessage(t *testing.T) {
 	}
 }
 
+func TestResolveMediaRefs_HistoricalToolRoleImageDoesNotAppendAsUserMessage(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	pngPath := filepath.Join(dir, "historical-tool-result.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00,
+		0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := store.Store(pngPath, media.MediaMeta{}, "test")
+
+	messages := []providers.Message{
+		toolResultPromptMessage("Image loaded", "call_historical_tool_result_image", []string{ref}),
+		{Role: "user", Content: "now summarize it in one sentence"},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 1)
+
+	if len(result) != 2 {
+		t.Fatalf("expected historical tool message plus current follow-up, got %d messages", len(result))
+	}
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media in historical tool message, got %d", len(result[0].Media))
+	}
+	localPath, _, _ := store.ResolveWithMeta(ref)
+	if !strings.Contains(result[0].Content, "[image:"+localPath+"]") {
+		t.Fatalf("expected image path tag in historical tool content, got %q", result[0].Content)
+	}
+	if result[1].Role != "user" || result[1].Content != "now summarize it in one sentence" {
+		t.Fatalf("expected current follow-up user message to remain untouched, got %#v", result[1])
+	}
+}
+
+func TestResolveMediaRefs_HistoricalAndCurrentToolImagesOnlyRehydrateCurrentTurn(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	historicalPath := filepath.Join(dir, "historical.png")
+	currentPath := filepath.Join(dir, "current.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00,
+		0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(historicalPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	historicalRef, _ := store.Store(historicalPath, media.MediaMeta{}, "test")
+	currentRef, _ := store.Store(currentPath, media.MediaMeta{}, "test")
+
+	messages := []providers.Message{
+		toolResultPromptMessage("Historical image loaded", "call_hist_image", []string{historicalRef}),
+		{Role: "assistant", Content: "Now I will inspect a new image."},
+		toolResultPromptMessage("Current image loaded", "call_current_image", []string{currentRef}),
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 1)
+
+	if len(result) != 4 {
+		t.Fatalf("expected 4 messages (historical tool + assistant + current tool + synthetic user), "+
+			"got %d", len(result))
+	}
+	if result[0].Role != "tool" || len(result[0].Media) != 0 {
+		t.Fatalf("historical tool message = %#v, want path-tagged tool without media", result[0])
+	}
+	if !strings.Contains(result[0].Content, "[image:"+historicalPath+"]") {
+		t.Fatalf(
+			"expected historical tool content to contain %q, got %q",
+			"[image:"+historicalPath+"]",
+			result[0].Content,
+		)
+	}
+	if result[1].Role != "assistant" || result[1].Content != "Now I will inspect a new image." {
+		t.Fatalf("assistant boundary message = %#v, want untouched assistant", result[1])
+	}
+	if result[2].Role != "tool" || len(result[2].Media) != 0 {
+		t.Fatalf("current tool message = %#v, want path-tagged tool without media", result[2])
+	}
+	if !strings.Contains(result[2].Content, "[image:"+currentPath+"]") {
+		t.Fatalf("expected current tool content to contain %q, got %q", "[image:"+currentPath+"]", result[2].Content)
+	}
+	if result[3].Role != "user" || len(result[3].Media) != 1 {
+		t.Fatalf("synthetic follow-up = %#v, want one-media user message", result[3])
+	}
+	if !strings.HasPrefix(result[3].Media[0], "data:image/png;base64,") {
+		t.Fatalf("expected base64 image in synthetic follow-up, got %q", result[3].Media[0][:40])
+	}
+}
+
 func TestResolveMediaRefs_MultiToolCallPreservesOrdering(t *testing.T) {
 	store := media.NewFileMediaStore()
 	dir := t.TempDir()
@@ -5792,10 +6895,10 @@ func TestResolveMediaRefs_MultiToolCallPreservesOrdering(t *testing.T) {
 	// Simulate: assistant called load_image + read_file, two tool results follow
 	messages := []providers.Message{
 		{Role: "assistant", Content: "Let me load the image and read the file."},
-		{Role: "tool", Content: "Image loaded [image: photo]", Media: []string{imgRef}},
-		{Role: "tool", Content: "file contents here"},
+		toolResultPromptMessage("Image loaded [image: photo]", "call_load_image_multi_tool", []string{imgRef}),
+		toolResultPromptMessage("file contents here", "call_read_file_multi_tool", nil),
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	// assistant, tool#1, tool#2 must remain contiguous — no user in between
 	if result[0].Role != "assistant" {
@@ -5820,6 +6923,52 @@ func TestResolveMediaRefs_MultiToolCallPreservesOrdering(t *testing.T) {
 	}
 }
 
+func TestResolveMediaRefs_MultipleCurrentToolImagesShareSingleSyntheticFollowUp(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	firstPath := filepath.Join(dir, "first.png")
+	secondPath := filepath.Join(dir, "second.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00,
+		0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(firstPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firstRef, _ := store.Store(firstPath, media.MediaMeta{}, "test")
+	secondRef, _ := store.Store(secondPath, media.MediaMeta{}, "test")
+
+	messages := []providers.Message{
+		{Role: "assistant", Content: "I loaded two images for comparison."},
+		toolResultPromptMessage("First image loaded", "call_first_image", []string{firstRef}),
+		toolResultPromptMessage("Second image loaded", "call_second_image", []string{secondRef}),
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
+
+	if len(result) != 4 {
+		t.Fatalf("expected assistant + 2 tool results + 1 synthetic follow-up, got %d messages", len(result))
+	}
+	if result[3].Role != "user" {
+		t.Fatalf("synthetic follow-up role = %q, want user", result[3].Role)
+	}
+	if len(result[3].Media) != 2 {
+		t.Fatalf("synthetic follow-up media count = %d, want 2", len(result[3].Media))
+	}
+	for i, ref := range result[3].Media {
+		if !strings.HasPrefix(ref, "data:image/png;base64,") {
+			t.Fatalf("synthetic follow-up media[%d] missing data URL prefix: %q", i, ref[:40])
+		}
+	}
+}
+
 func TestResolveMediaRefs_OversizedImageSkipsBase64KeepsPathTag(t *testing.T) {
 	store := media.NewFileMediaStore()
 	dir := t.TempDir()
@@ -5837,7 +6986,7 @@ func TestResolveMediaRefs_OversizedImageSkipsBase64KeepsPathTag(t *testing.T) {
 		{Role: "user", Content: "hi", Media: []string{ref}},
 	}
 	// Use a tiny limit (1KB) so the file is oversized
-	result := resolveMediaRefs(messages, store, 1024)
+	result := resolveMediaRefs(messages, store, 1024, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media (oversized), got %d", len(result[0].Media))
@@ -5862,7 +7011,7 @@ func TestResolveMediaRefs_UnknownTypeInjectsPath(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "hi", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media entries, got %d", len(result[0].Media))
@@ -5877,7 +7026,7 @@ func TestResolveMediaRefs_PassesThroughNonMediaRefs(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "hi", Media: []string{"https://example.com/img.png"}},
 	}
-	result := resolveMediaRefs(messages, nil, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, nil, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 1 || result[0].Media[0] != "https://example.com/img.png" {
 		t.Fatalf("expected passthrough of non-media:// URL, got %v", result[0].Media)
@@ -5902,7 +7051,7 @@ func TestResolveMediaRefs_DoesNotMutateOriginal(t *testing.T) {
 	}
 	originalRef := original[0].Media[0]
 
-	resolveMediaRefs(original, store, config.DefaultMaxMediaSize)
+	resolveMediaRefs(original, store, config.DefaultMaxMediaSize, 0)
 
 	if original[0].Media[0] != originalRef {
 		t.Fatal("resolveMediaRefs mutated original message slice")
@@ -5922,7 +7071,7 @@ func TestResolveMediaRefs_UsesMetaContentType(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "hi", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media (images use path tags), got %d", len(result[0].Media))
@@ -5946,7 +7095,7 @@ func TestResolveMediaRefs_PDFInjectsFilePath(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "report.pdf [file]", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media (non-image), got %d", len(result[0].Media))
@@ -5968,7 +7117,7 @@ func TestResolveMediaRefs_AudioInjectsAudioPath(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "voice.ogg [audio]", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media, got %d", len(result[0].Media))
@@ -5990,7 +7139,7 @@ func TestResolveMediaRefs_VideoInjectsVideoPath(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "clip.mp4 [video]", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media, got %d", len(result[0].Media))
@@ -6012,7 +7161,7 @@ func TestResolveMediaRefs_NoGenericTagAppendsPath(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "here is my data", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	expected := "here is my data [file:" + csvPath + "]"
 	if result[0].Content != expected {
@@ -6104,7 +7253,7 @@ func TestResolveMediaRefs_JSONContentPrependsPathTag(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: jsonContent, Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	want := "[image:" + pngPath + "]\n" + jsonContent
 	if result[0].Content != want {
@@ -6124,7 +7273,7 @@ func TestResolveMediaRefs_EmptyContentGetsPathTag(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "", Media: []string{ref}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	expected := "[file:" + docPath + "]"
 	if result[0].Content != expected {
@@ -6153,7 +7302,7 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "check these [file]", Media: []string{imgRef, fileRef}},
 	}
-	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
 	if len(result[0].Media) != 0 {
 		t.Fatalf("expected 0 media (all types use path tags), got %d", len(result[0].Media))
@@ -6170,12 +7319,14 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 
 type nativeSearchProvider struct {
 	supported bool
+	lastOpts  map[string]any
 }
 
 func (p *nativeSearchProvider) Chat(
 	ctx context.Context, msgs []providers.Message, tools []providers.ToolDefinition,
 	model string, opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	p.lastOpts = shallowCloneLLMOptions(opts)
 	return &providers.LLMResponse{Content: "ok"}, nil
 }
 
@@ -6193,6 +7344,40 @@ func (p *plainProvider) Chat(
 }
 
 func (p *plainProvider) GetDefaultModel() string { return "test-model" }
+
+func TestProcessMessage_NativeSearchHandlesHookClearingOptions(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.ModelName = "test-model"
+	cfg.Agents.Defaults.MaxToolIterations = 2
+	cfg.Tools.Web.Enabled = true
+	cfg.Tools.Web.PreferNative = true
+
+	provider := &nativeSearchProvider{supported: true}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	agent.Provider = provider
+	agent.Candidates = nil
+	if err := al.MountHook(NamedHook("clear-options", clearOptionsHook{})); err != nil {
+		t.Fatalf("MountHook() error = %v", err)
+	}
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel: "pico",
+		ChatID:  "native-search-hook",
+		Content: "search",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "ok" {
+		t.Fatalf("response = %q, want ok", response)
+	}
+	if got := provider.lastOpts["native_search"]; got != true {
+		t.Fatalf("native_search option = %#v, want true", got)
+	}
+}
 
 func TestIsNativeSearchProvider_Supported(t *testing.T) {
 	if !isNativeSearchProvider(&nativeSearchProvider{supported: true}) {
@@ -6250,7 +7435,13 @@ func TestFilterClientWebSearch_EmptyInput(t *testing.T) {
 type overflowProvider struct {
 	calls        int
 	lastMessages []providers.Message
-	chatFunc     func(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, opts map[string]any) (*providers.LLMResponse, error)
+	chatFunc     func(
+		ctx context.Context,
+		messages []providers.Message,
+		tools []providers.ToolDefinition,
+		model string,
+		opts map[string]any,
+	) (*providers.LLMResponse, error)
 }
 
 func (p *overflowProvider) Chat(
@@ -6617,4 +7808,84 @@ func (p *concurrentMockProvider) Chat(
 
 func (p *concurrentMockProvider) GetDefaultModel() string {
 	return "test-model"
+}
+
+func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.MaxParallelTurns = 1
+
+	msgBus := bus.NewMessageBus()
+	provider := &panicAfterStartProvider{started: make(chan struct{})}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	defer al.Close()
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- al.Run(runCtx)
+	}()
+	defer func() {
+		cancelRun()
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Run() to exit")
+		}
+	}()
+
+	msg := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "panic-chat",
+			ChatType: "direct",
+			SenderID: "user1",
+		},
+		Content:    "trigger panic",
+		SessionKey: "panic-session",
+	}
+	route, _, err := al.resolveMessageRoute(msg)
+	if err != nil {
+		t.Fatalf("resolveMessageRoute() error = %v", err)
+	}
+	scopeKey := resolveScopeKey(al.allocateRouteSession(route, msg).SessionKey, msg.SessionKey)
+
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound(first) error = %v", err)
+	}
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first turn to start")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if al.getActiveTurnState(scopeKey) == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session turn state remained stuck after worker panic")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound(second) error = %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if provider.calls.Load() >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second message did not start a new turn after panic cleanup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

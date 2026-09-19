@@ -5,6 +5,7 @@ import "context"
 func clearCommand() Definition {
 	return Definition{
 		Name:        "clear",
+		Aliases:     []string{"reset"},
 		Description: "Clear the chat history",
 		Usage:       "/clear",
 		Handler: func(_ context.Context, req Request, rt *Runtime) error {

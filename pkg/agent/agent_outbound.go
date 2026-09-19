@@ -6,11 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -21,7 +21,7 @@ func (al *AgentLoop) maybePublishError(ctx context.Context, channel, chatID, ses
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, fmt.Sprintf("Error processing message: %v", err))
+	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, formatProcessingError(err))
 	return true
 }
 
@@ -46,11 +46,23 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 	}
 
 	alreadySentToSameChat := false
-	defaultAgent := al.GetRegistry().GetDefaultAgent()
-	if defaultAgent != nil {
-		if tool, ok := defaultAgent.Tools.Get("message"); ok {
+	sessionAgent := al.agentForSession(sessionKey)
+	if sessionAgent != nil {
+		if tool, ok := sessionAgent.Tools.Get("message"); ok {
 			if mt, ok := tool.(*tools.MessageTool); ok {
 				alreadySentToSameChat = mt.HasSentTo(sessionKey, channel, chatID)
+			}
+		}
+	}
+	if !alreadySentToSameChat {
+		if reg := al.GetRegistry(); reg != nil {
+			defaultAgent := reg.GetDefaultAgent()
+			if defaultAgent != nil && defaultAgent != sessionAgent {
+				if tool, ok := defaultAgent.Tools.Get("message"); ok {
+					if mt, ok := tool.(*tools.MessageTool); ok {
+						alreadySentToSameChat = mt.HasSentTo(sessionKey, channel, chatID)
+					}
+				}
 			}
 		}
 	}
@@ -70,6 +82,21 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 			"agent",
 			"Skipped outbound (message tool already sent to same chat)",
 			map[string]any{"channel": channel, "chat_id": chatID},
+		)
+		return
+	}
+
+	// Defense-in-depth: Never emit internal CoT reasoning or system prompt directives to external chat channels.
+	if isClientFacingChannel(channel) && containsLeakedInternalArtifacts(response) {
+		logger.ErrorCF(
+			"agent",
+			"CRITICAL: Blocked outbound message to client containing leaked system prompt / reasoning artifacts",
+			map[string]any{
+				"channel":     channel,
+				"chat_id":     chatID,
+				"session_key": sessionKey,
+				"content_len": len(response),
+			},
 		)
 		return
 	}
@@ -293,4 +320,12 @@ func (al *AgentLoop) handleReasoning(
 			})
 		}
 	}
+}
+
+func isClientFacingChannel(channel string) bool {
+	return constants.IsClientFacingChannel(channel)
+}
+
+func containsLeakedInternalArtifacts(content string) bool {
+	return constants.ContainsLeakedInternalArtifacts(content)
 }

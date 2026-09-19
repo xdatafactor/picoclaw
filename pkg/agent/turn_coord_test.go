@@ -193,6 +193,38 @@ func (p *errorProvider) GetDefaultModel() string {
 	return "error-model"
 }
 
+type failOnceLLMProvider struct {
+	err       error
+	response  string
+	callCount int
+	mu        sync.Mutex
+}
+
+func (p *failOnceLLMProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.callCount++
+	callCount := p.callCount
+	p.mu.Unlock()
+
+	if callCount == 1 {
+		return nil, p.err
+	}
+	return &providers.LLMResponse{
+		Content:      p.response,
+		FinishReason: "stop",
+	}, nil
+}
+
+func (p *failOnceLLMProvider) GetDefaultModel() string {
+	return "fail-once-model"
+}
+
 // =============================================================================
 // Test Helper Functions
 // =============================================================================
@@ -397,6 +429,7 @@ func TestPipeline_CallLLM_UsesSuccessfulFallbackDisplayNameWithoutAlias(t *testi
 		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary", DisplayName: "primary-model"},
 		{Provider: "anthropic", Model: "claude-sonnet", DisplayName: "anthropic/claude-sonnet"},
 	}
+	agent.CandidateProviders[candidateProviderKey(agent.Candidates[1])] = provider
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 
 	pipeline := NewPipeline(al)
@@ -583,6 +616,59 @@ func TestPipeline_CallLLM_TimeoutRetry(t *testing.T) {
 	_, err = pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
 	if err == nil {
 		t.Error("expected error after retries")
+	}
+}
+
+func TestPipeline_CallLLM_HTTP5xxRetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	provider := &failOnceLLMProvider{
+		err:      errors.New("API request failed:\n  Status: 500\n  Body:   internal server error"),
+		response: "Recovered from server error",
+	}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:           tmpDir,
+				ModelName:           "test-model",
+				MaxTokens:           4096,
+				MaxToolIterations:   10,
+				MaxLLMRetries:       1,
+				LLMRetryBackoffSecs: 1,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	al := NewAgentLoop(cfg, msgBus, provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err != nil {
+		t.Fatalf("expected HTTP 500 retry to recover, got error: %v", err)
+	}
+	if ctrl != ControlBreak {
+		t.Fatalf("expected ControlBreak, got %v", ctrl)
+	}
+	if exec.finalContent != "Recovered from server error" {
+		t.Fatalf("finalContent = %q, want recovered response", exec.finalContent)
+	}
+	if provider.callCount != 2 {
+		t.Fatalf("callCount = %d, want 2", provider.callCount)
 	}
 }
 

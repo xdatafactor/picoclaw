@@ -93,12 +93,15 @@
       "noModel": "No default model configured. Go to Models page to set one."
     },
     "sendMessage": "Send message",
-    "sendHint": "Press Enter to send\nShift + Enter for a new line",
+    "composeHint": "Press Enter to send, Shift + Enter for a new line",
     "contextTitle": "Context",
     "contextDetail": "View Details",
+    "contextCompressAt": "Compress at",
+    "contextSummarizeAt": "Summarize at",
     "attachImage": "Add images",
+    "dropImagesActive": "Release to add images",
     "removeImage": "Remove image",
-    "uploadedImage": "Uploaded image",
+    "uploadedImage": "Attached image",
     "invalidImage": "\"{{name}}\" is not a supported image file.",
     "imageTooLarge": "\"{{name}}\" exceeds the {{size}} limit.",
     "imageReadFailed": "Failed to read \"{{name}}\".",
@@ -250,17 +253,41 @@
     "action": {
       "edit": "Edit API key",
       "setDefault": "Set as default",
+      "addToFallback": "Add to fallback chain",
+      "removeFromFallback": "Remove from fallback chain",
       "delete": "Delete model",
       "setDefaultDisabled": {
-        "setting": "Setting as default...",
         "unavailable": "Cannot set unavailable model as default",
         "isDefault": "Already the default model",
         "isVirtual": "Cannot set virtual model as default",
         "unsupportedProvider": "This provider cannot be used as the default chat model."
       },
+      "addToFallbackDisabled": {
+        "isDefault": "Default model cannot be added to the fallback chain"
+      },
       "deleteDisabled": {
         "isDefault": "Cannot delete the default model"
       }
+    },
+    "defaultChain": {
+      "button": "Fallback Chain",
+      "title": "Default Model and Fallback Chain",
+      "manage": "Manage Chain",
+      "summary_one": "{{model}} with {{count}} fallback",
+      "summary_other": "{{model}} with {{count}} fallbacks",
+      "noDefault": "No default model selected yet.",
+      "dialogTitle": "Edit Fallback Chain",
+      "dialogDescription": "Review and reorder the fallback models used after the default model fails.",
+      "defaultModel": "Default model",
+      "fallbackChain": "Fallback chain",
+      "empty": "No fallback models added yet. Use the model cards to add backups.",
+      "moveTop": "Move to top",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "moveBottom": "Move to bottom",
+      "remove": "Remove from chain",
+      "saveSuccess": "Default model chain saved.",
+      "unsaved": "The default model or fallback chain has changed. Save to apply the updated chain."
     },
     "defaultOnSave": {
       "label": "Default Model",
@@ -847,6 +874,11 @@
       "allowed_cidrs": "Allowed Network CIDRs",
       "allowed_cidrs_hint": "Only clients from these CIDR ranges can access the service. One per line or comma-separated. Leave empty to allow all.",
       "allowed_cidrs_placeholder": "192.168.1.0/24\n10.0.0.0/8",
+      "allow_localhost_bypass": "Allow Localhost Bypass",
+      "allow_localhost_bypass_hint": "When enabled, localhost requests are allowed even when they do not match the allowed CIDRs. Disable this when the launcher is behind a same-host proxy.",
+      "trusted_proxy_cidrs": "Trusted Proxy CIDRs",
+      "trusted_proxy_cidrs_hint": "Only proxies from these CIDR ranges may provide client IP information such as X-Forwarded-For. Leave empty to ignore proxy client IP headers.",
+      "trusted_proxy_cidrs_placeholder": "172.16.0.0/12\n127.0.0.1/32",
       "evolution_section_hint": "Let the agent learn from completed turns and prepare skill improvements.",
       "evolution_enabled": "Enable Evolution",
       "evolution_enabled_hint": "Record learning data for completed turns. Draft and apply modes can also generate skill updates.",

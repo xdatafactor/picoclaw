@@ -5,6 +5,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/agent/interfaces"
@@ -15,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
@@ -91,6 +94,7 @@ func NewAgentLoop(
 			})
 		}
 	}
+	al.activeReqCond = sync.NewCond(&al.activeReqMu)
 	al.refreshRuntimeEventLogger(cfg)
 	al.providerFactory = providers.CreateProviderFromConfig
 	al.hooks = NewHookManager(al.runtimeEvents.Channel())
@@ -123,6 +127,22 @@ func registerSharedTools(
 		agent, ok := registry.GetAgent(agentID)
 		if !ok {
 			continue
+		}
+
+		// The public WhatsApp agent gets one structured domain bridge instead of
+		// shell, generic filesystem, MCP, or subagent capabilities.
+		if agentID == "rodolfo-rfreire" {
+			xdfTool, err := tools.NewXDFIntakeTool(
+				os.Getenv("XDF_GO_ENGINE_URL"),
+				os.Getenv("XDF_INTERNAL_API_TOKEN_FILE"),
+				media.TempDir(),
+				int64(cfg.Agents.Defaults.GetMaxMediaSize()),
+			)
+			if err != nil {
+				logger.ErrorCF("agent", "Failed to create XDF intake tool", map[string]any{"error": err.Error()})
+			} else {
+				agent.Tools.Register(xdfTool)
+			}
 		}
 
 		if cfg.Tools.IsToolEnabled("web") {
@@ -161,26 +181,58 @@ func registerSharedTools(
 		// Message tool
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()
+			if cfg.Tools.Message.MediaEnabled {
+				messageTool.ConfigureLocalMedia(
+					agent.Workspace,
+					cfg.Agents.Defaults.RestrictToWorkspace,
+					cfg.Agents.Defaults.GetMaxMediaSize(),
+					allowReadPaths,
+				)
+			}
 			messageTool.SetSendCallback(func(
 				ctx context.Context,
 				channel, chatID, content, replyToMessageID string,
+				mediaParts []bus.MediaPart,
 			) error {
-				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer pubCancel()
 				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
 				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
 					tools.ToolAgentID(ctx),
 					tools.ToolSessionKey(ctx),
 					tools.ToolSessionScope(ctx),
 				)
-				return msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+				if len(mediaParts) > 0 {
+					outboundMedia := bus.OutboundMediaMessage{
+						Channel:    channel,
+						ChatID:     chatID,
+						Context:    outboundCtx,
+						AgentID:    outboundAgentID,
+						SessionKey: outboundSessionKey,
+						Scope:      outboundScope,
+						Parts:      mediaParts,
+					}
+					if al.channelManager != nil && channel != "" {
+						return al.channelManager.SendMedia(ctx, outboundMedia)
+					}
+					pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer pubCancel()
+					return msgBus.PublishOutboundMedia(pubCtx, outboundMedia)
+				}
+				outboundMessage := bus.OutboundMessage{
+					Channel:          channel,
+					ChatID:           chatID,
 					Context:          outboundCtx,
 					AgentID:          outboundAgentID,
 					SessionKey:       outboundSessionKey,
 					Scope:            outboundScope,
 					Content:          content,
 					ReplyToMessageID: replyToMessageID,
-				})
+				}
+				if al.channelManager != nil && channel != "" {
+					return al.channelManager.SendMessage(ctx, outboundMessage)
+				}
+				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer pubCancel()
+				return msgBus.PublishOutbound(pubCtx, outboundMessage)
 			})
 			agent.Tools.Register(messageTool)
 		}
@@ -264,7 +316,7 @@ func registerSharedTools(
 			// This keeps subagent vision support working even when the optimized
 			// sub-turn spawner path is unavailable.
 			subagentManager.SetMediaResolver(func(msgs []providers.Message) []providers.Message {
-				return resolveMediaRefs(msgs, al.mediaStore, cfg.Agents.Defaults.GetMaxMediaSize())
+				return resolveMediaRefs(msgs, al.mediaStore, cfg.Agents.Defaults.GetMaxMediaSize(), 0)
 			})
 
 			// Set the spawner that links into AgentLoop's turnState

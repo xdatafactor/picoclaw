@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -162,11 +163,29 @@ func outboundMessageChatID(msg bus.OutboundMessage) string {
 	return msg.ChatID
 }
 
+// isWhatsAppBroadcastTarget reports whether a chat ID targets a WhatsApp
+// broadcast/status JID (e.g. status@broadcast). Sending to these JIDs posts
+// a status/story on the account, which is explicitly forbidden for every
+// channel. This guard is central: it protects all outbound paths (text,
+// media, and direct channel sends).
+func isWhatsAppBroadcastTarget(chatID string) bool {
+	lower := strings.ToLower(strings.TrimSpace(chatID))
+	return strings.Contains(lower, "status@broadcast") ||
+		strings.HasSuffix(lower, "@broadcast")
+}
+
 func outboundMessageIsToolFeedback(msg bus.OutboundMessage) bool {
 	if len(msg.Context.Raw) == 0 {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), "tool_feedback")
+}
+
+func outboundMessageIsToolCalls(msg bus.OutboundMessage) bool {
+	if len(msg.Context.Raw) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), "tool_calls")
 }
 
 func outboundMessageHasAuxiliaryKind(msg bus.OutboundMessage) bool {
@@ -379,6 +398,7 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 	}
 
 	isToolFeedback := outboundMessageIsToolFeedback(msg)
+	isToolCalls := outboundMessageIsToolCalls(msg)
 	isAuxiliaryMessage := outboundMessageHasAuxiliaryKind(msg)
 	isFinalMessage := outboundMessageIsFinal(msg)
 	separateToolFeedbackMessages := m.toolFeedbackSeparateMessagesEnabled()
@@ -388,7 +408,9 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 	// finalization bypasses the worker queue, so older queued feedback/thoughts
 	// can arrive before the normal final outbound message that cleans up the
 	// marker and placeholder.
-	if isAuxiliaryMessage {
+	// Note: tool_calls messages must NOT be dropped as they represent new tool
+	// invocations for the current turn that must be delivered to the UI.
+	if isAuxiliaryMessage && !isToolCalls {
 		if _, loaded := m.streamActive.Load(streamKey); loaded {
 			return nil, true
 		}
@@ -688,18 +710,34 @@ func setStreamerModelName(streamer any, modelName string) {
 	setter.SetModelName(modelName)
 }
 
+type turnUsageStreamer interface {
+	SetTurnUsage(inputTokens, outputTokens int)
+}
+
+// setStreamerTurnUsage forwards real per-turn token usage to a streamer that
+// supports it, transparently unwrapping the manager's streamer wrappers.
+func setStreamerTurnUsage(streamer any, inputTokens, outputTokens int) {
+	setter, ok := streamer.(turnUsageStreamer)
+	if !ok {
+		return
+	}
+	setter.SetTurnUsage(inputTokens, outputTokens)
+}
+
 // splitMarkerStreamer turns accumulated streaming text containing
 // MessageSplitMarker into separate channel stream messages.
 type splitMarkerStreamer struct {
-	mu             sync.Mutex
-	current        bus.Streamer
-	reasoning      bus.ReasoningStreamer
-	begin          func(context.Context) (bus.Streamer, error)
-	completedParts int
-	finalized      bool
-	onFinalize     func(context.Context, string)
-	clearMarker    func()
-	modelName      string
+	mu               sync.Mutex
+	current          bus.Streamer
+	reasoning        bus.ReasoningStreamer
+	begin            func(context.Context) (bus.Streamer, error)
+	completedParts   int
+	finalized        bool
+	onFinalize       func(context.Context, string)
+	clearMarker      func()
+	modelName        string
+	turnInputTokens  int
+	turnOutputTokens int
 }
 
 func (s *splitMarkerStreamer) Update(ctx context.Context, content string) error {
@@ -748,6 +786,14 @@ func (s *splitMarkerStreamer) SetModelName(modelName string) {
 	s.modelName = strings.TrimSpace(modelName)
 	setStreamerModelName(s.current, s.modelName)
 	setStreamerModelName(s.reasoning, s.modelName)
+}
+
+func (s *splitMarkerStreamer) SetTurnUsage(inputTokens, outputTokens int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnInputTokens = inputTokens
+	s.turnOutputTokens = outputTokens
+	setStreamerTurnUsage(s.current, s.turnInputTokens, s.turnOutputTokens)
 }
 
 func (s *splitMarkerStreamer) Cancel(ctx context.Context) {
@@ -829,6 +875,7 @@ func (s *splitMarkerStreamer) ensureCurrentLocked(ctx context.Context) error {
 	}
 	s.current = streamer
 	setStreamerModelName(s.current, s.modelName)
+	setStreamerTurnUsage(s.current, s.turnInputTokens, s.turnOutputTokens)
 	return nil
 }
 
@@ -915,6 +962,10 @@ func (s *finalizeHookStreamer) FinalizeReasoning(ctx context.Context, content st
 
 func (s *finalizeHookStreamer) SetModelName(modelName string) {
 	setStreamerModelName(s.Streamer, strings.TrimSpace(modelName))
+}
+
+func (s *finalizeHookStreamer) SetTurnUsage(inputTokens, outputTokens int) {
+	setStreamerTurnUsage(s.Streamer, inputTokens, outputTokens)
 }
 
 func (s *finalizeHookStreamer) runFinalizeHook(ctx context.Context, content string) {
@@ -1269,6 +1320,16 @@ func (m *Manager) StartAll(ctx context.Context) error {
 			for _, listener := range m.httpListeners {
 				ln := listener
 				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.ErrorCF("channels", "HTTP server goroutine panic recovered",
+								map[string]any{
+									"addr":  ln.Addr().String(),
+									"panic": fmt.Sprintf("%v", r),
+									"stack": string(debug.Stack()),
+								})
+						}
+					}()
 					logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
 						"addr": ln.Addr().String(),
 					})
@@ -1282,6 +1343,16 @@ func (m *Manager) StartAll(ctx context.Context) error {
 			}
 		} else {
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.ErrorCF("channels", "HTTP server goroutine panic recovered",
+							map[string]any{
+								"addr":  m.httpServer.Addr,
+								"panic": fmt.Sprintf("%v", r),
+								"stack": string(debug.Stack()),
+							})
+					}
+				}()
 				logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
 					"addr": m.httpServer.Addr,
 				})
@@ -1491,6 +1562,21 @@ func (m *Manager) sendWithRetry(
 	w *channelWorker,
 	msg bus.OutboundMessage,
 ) ([]string, bool) {
+	// Central safety guard: never emit internal CoT reasoning, system prompts, or diagnostic artifacts to client-facing channels.
+	if constants.IsClientFacingChannel(name) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
+		logger.ErrorCF(
+			"channels",
+			"CRITICAL: Central channel manager blocked outbound message containing leaked internal artifacts",
+			map[string]any{
+				"channel":     name,
+				"chat_id":     outboundMessageChatID(msg),
+				"session_key": msg.SessionKey,
+				"content_len": len(msg.Content),
+			},
+		)
+		return nil, true // Treat as handled so workers don't retry or stall
+	}
+
 	// Rate limit: wait for token
 	if err := w.limiter.Wait(ctx); err != nil {
 		// ctx canceled, shutting down
@@ -1933,6 +2019,15 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 	// Commit hashes only on full success.
 	m.channelHashes = list
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.ErrorCF("channels", "channel registration goroutine panic recovered",
+					map[string]any{
+						"panic": fmt.Sprintf("%v", r),
+						"stack": string(debug.Stack()),
+					})
+			}
+		}()
 		for _, f := range deferFuncs {
 			f()
 		}
@@ -1973,6 +2068,29 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	msg = bus.NormalizeOutboundMessage(msg)
 	channelName := outboundMessageChannel(msg)
 
+	// Central safety guard: never allow sending to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(outboundMessageChatID(msg)) {
+		return fmt.Errorf(
+			"outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			outboundMessageChatID(msg),
+		)
+	}
+
+	if constants.IsClientFacingChannel(channelName) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
+		logger.ErrorCF(
+			"channels",
+			"CRITICAL: SendMessage blocked outbound message containing leaked internal artifacts",
+			map[string]any{
+				"channel":     channelName,
+				"chat_id":     outboundMessageChatID(msg),
+				"session_key": msg.SessionKey,
+				"content_len": len(msg.Content),
+			},
+		)
+		return fmt.Errorf("outbound blocked: message contains leaked internal artifacts")
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
@@ -2012,6 +2130,15 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 	msg = bus.NormalizeOutboundMediaMessage(msg)
 	channelName := outboundMediaChannel(msg)
 
+	// Central safety guard: never allow media to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(outboundMediaChatID(msg)) {
+		return fmt.Errorf(
+			"outbound blocked: refusing to send media to broadcast/status JID %q (stories are disabled)",
+			outboundMediaChatID(msg),
+		)
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
@@ -2029,6 +2156,15 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 }
 
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {
+	// Central safety guard: never allow sending to WhatsApp broadcast/status
+	// JIDs (publishing stories). Applies to every channel.
+	if isWhatsAppBroadcastTarget(chatID) {
+		return fmt.Errorf(
+			"outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			chatID,
+		)
+	}
+
 	m.mu.RLock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
