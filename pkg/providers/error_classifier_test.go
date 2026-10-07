@@ -321,6 +321,30 @@ func TestClassifyError_AuthPatterns(t *testing.T) {
 	}
 }
 
+func TestClassifyError_LocationPatterns(t *testing.T) {
+	patterns := []string{
+		`API request failed: Status: 400 Body: {"error": {"code": 400, "message": "User location is not supported for the API use.", "status": "FAILED_PRECONDITION"}}`,
+		"country not supported",
+		"region not supported",
+		"failed_precondition",
+	}
+
+	for _, msg := range patterns {
+		err := errors.New(msg)
+		result := ClassifyError(err, "gemini", "gemini-2.5-flash")
+		if result == nil {
+			t.Errorf("pattern %q: expected non-nil", msg)
+			continue
+		}
+		if result.Reason != FailoverAuth {
+			t.Errorf("pattern %q: reason = %q, want auth", msg, result.Reason)
+		}
+		if !result.IsRetriable() {
+			t.Errorf("pattern %q: expected retriable=true", msg)
+		}
+	}
+}
+
 func TestClassifyError_FormatPatterns(t *testing.T) {
 	patterns := []string{
 		"string should match pattern",
