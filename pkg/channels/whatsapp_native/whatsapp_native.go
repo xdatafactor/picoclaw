@@ -87,7 +87,10 @@ func NewWhatsAppNativeChannel(
 	bus *bus.MessageBus,
 	storePath string,
 ) (channels.Channel, error) {
-	base := channels.NewBaseChannel(name, cfg, bus, bc.AllowFrom, channels.WithMaxMessageLength(65536))
+	base := channels.NewBaseChannel(name, cfg, bus, bc.AllowFrom,
+		channels.WithMaxMessageLength(65536),
+		channels.WithGroupTrigger(bc.GroupTrigger),
+	)
 	if storePath == "" {
 		storePath = "whatsapp"
 	}
@@ -521,6 +524,116 @@ func (c *WhatsAppNativeChannel) markRead(evt *events.Message) {
 	}
 }
 
+func getContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	if msg.ExtendedTextMessage != nil && msg.ExtendedTextMessage.ContextInfo != nil {
+		return msg.ExtendedTextMessage.ContextInfo
+	}
+	if msg.ImageMessage != nil && msg.ImageMessage.ContextInfo != nil {
+		return msg.ImageMessage.ContextInfo
+	}
+	if msg.DocumentMessage != nil && msg.DocumentMessage.ContextInfo != nil {
+		return msg.DocumentMessage.ContextInfo
+	}
+	if msg.AudioMessage != nil && msg.AudioMessage.ContextInfo != nil {
+		return msg.AudioMessage.ContextInfo
+	}
+	if msg.VideoMessage != nil && msg.VideoMessage.ContextInfo != nil {
+		return msg.VideoMessage.ContextInfo
+	}
+	return nil
+}
+
+func stripBotMentions(content string, ownUser string) string {
+	for _, m := range []string{"@5585996081332", "@85996081332", "@996081332", "@558588497965", "@8588497965", "@rodolfo", "@Rodolfo"} {
+		content = strings.ReplaceAll(content, m, "")
+	}
+	if ownUser != "" {
+		content = strings.ReplaceAll(content, "@"+ownUser, "")
+		trimmedUser := strings.TrimPrefix(ownUser, "55")
+		if trimmedUser != "" {
+			content = strings.ReplaceAll(content, "@"+trimmedUser, "")
+		}
+	}
+	return strings.TrimSpace(content)
+}
+
+func (c *WhatsAppNativeChannel) isBotMentionedOrQuoted(evt *events.Message, content string) bool {
+	c.mu.Lock()
+	client := c.client
+	c.mu.Unlock()
+
+	var ownJIDStr, ownUser, ownLIDStr, ownLIDUser string
+	if client != nil && client.Store != nil {
+		if client.Store.ID != nil {
+			ownJID := client.Store.ID.ToNonAD()
+			ownJIDStr = ownJID.String()
+			ownUser = ownJID.User
+		}
+		ownLID := client.Store.GetLID().ToNonAD()
+		ownLIDStr = ownLID.String()
+		ownLIDUser = ownLID.User
+	}
+
+	matchesBot := func(candidate string) bool {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return false
+		}
+		clean := strings.TrimPrefix(candidate, "@")
+		clean = strings.TrimSuffix(clean, "@s.whatsapp.net")
+		clean = strings.TrimSuffix(clean, "@lid")
+		if idx := strings.Index(clean, ":"); idx >= 0 {
+			clean = clean[:idx]
+		}
+
+		if ownJIDStr != "" && (candidate == ownJIDStr || clean == ownUser) {
+			return true
+		}
+		if ownLIDStr != "" && (candidate == ownLIDStr || clean == ownLIDUser) {
+			return true
+		}
+		if clean == "5585996081332" || clean == "85996081332" || clean == "558588497965" || clean == "8588497965" {
+			return true
+		}
+		return false
+	}
+
+	ctxInfo := getContextInfo(evt.Message)
+	if ctxInfo != nil {
+		// 1. Check mentioned JIDs in message context
+		for _, m := range ctxInfo.MentionedJID {
+			if matchesBot(m) {
+				return true
+			}
+		}
+
+		// 2. Check quoted message participant (when user replies to/quotes a bot message)
+		quotedParticipant := ctxInfo.GetParticipant()
+		if quotedParticipant != "" && matchesBot(quotedParticipant) {
+			return true
+		}
+	}
+
+	// 3. Check textual mention in content
+	lowerContent := strings.ToLower(content)
+	if strings.Contains(lowerContent, "@5585996081332") ||
+		strings.Contains(lowerContent, "@85996081332") ||
+		strings.Contains(lowerContent, "@996081332") ||
+		strings.Contains(lowerContent, "@558588497965") ||
+		strings.Contains(lowerContent, "@8588497965") ||
+		strings.Contains(lowerContent, "@rodolfo") {
+		return true
+	}
+	if ownUser != "" && strings.Contains(content, "@"+ownUser) {
+		return true
+	}
+
+	return false
+}
+
 func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	if evt.Message == nil {
 		return
@@ -534,15 +647,46 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		logger.InfoC("whatsapp", "Ignoring WhatsApp status/broadcast event (stories are not conversations)")
 		return
 	}
-	// Mark the message as read immediately so the sender sees blue double-checks.
-	c.markRead(evt)
 	senderID := evt.Info.Sender.String()
 	chatID := evt.Info.Chat.String()
 	content := evt.Message.GetConversation()
 	if content == "" && evt.Message.ExtendedTextMessage != nil {
 		content = evt.Message.ExtendedTextMessage.GetText()
 	}
+	if content == "" && evt.Message.ImageMessage != nil {
+		content = evt.Message.ImageMessage.GetCaption()
+	}
+	if content == "" && evt.Message.DocumentMessage != nil {
+		content = evt.Message.DocumentMessage.GetCaption()
+	}
+	if content == "" && evt.Message.VideoMessage != nil {
+		content = evt.Message.VideoMessage.GetCaption()
+	}
 	content = utils.SanitizeMessageContent(content)
+
+	// Rule 1: Groups - If message is from a group, only respond if mentioned (@) or quoted.
+	// Absolute silence if not addressed to the bot.
+	if evt.Info.Chat.Server == types.GroupServer {
+		isMentioned := c.isBotMentionedOrQuoted(evt, content)
+		shouldRespond, cleanContent := c.ShouldRespondInGroup(isMentioned, content)
+		if !shouldRespond {
+			logger.DebugCF("whatsapp", "Ignoring WhatsApp group message (not mentioned or quoted)", map[string]any{
+				"chat_id":   chatID,
+				"sender_id": senderID,
+			})
+			return
+		}
+		var ownUser string
+		c.mu.Lock()
+		if c.client != nil && c.client.Store != nil && c.client.Store.ID != nil {
+			ownUser = c.client.Store.ID.User
+		}
+		c.mu.Unlock()
+		content = stripBotMentions(cleanContent, ownUser)
+	}
+
+	// Mark the message as read immediately so the sender sees blue double-checks.
+	c.markRead(evt)
 
 	// Download any media attachments (PDF, images, audio, etc.)
 	var mediaPaths []string

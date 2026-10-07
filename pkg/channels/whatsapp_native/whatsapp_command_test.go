@@ -132,3 +132,128 @@ func TestDownloadedMediaFilenameFallsBackToMediaType(t *testing.T) {
 		t.Fatalf("downloaded filename=%q, want fallback name", got)
 	}
 }
+
+func TestHandleIncoming_GroupMessage_IgnoredWhenNotMentioned(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	gt := config.GroupTriggerConfig{MentionOnly: true}
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil, channels.WithGroupTrigger(gt)),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("1001", types.DefaultUserServer),
+				Chat:   types.NewJID("group123", types.GroupServer),
+			},
+			ID:       "mid_group_1",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("conversa normal no grupo sem marcar o bot"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	select {
+	case inbound, ok := <-messageBus.InboundChan():
+		if ok {
+			t.Fatalf("group message without mention must not be forwarded, got content=%q", inbound.Content)
+		}
+	case <-ctx.Done():
+		// Expected: absolute silence
+	}
+}
+
+func TestHandleIncoming_GroupMessage_RespondsWhenMentioned(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	gt := config.GroupTriggerConfig{MentionOnly: true}
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil, channels.WithGroupTrigger(gt)),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("1001", types.DefaultUserServer),
+				Chat:   types.NewJID("group123", types.GroupServer),
+			},
+			ID:       "mid_group_2",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text: proto.String("@5585996081332 qual o status do processo?"),
+				ContextInfo: &waE2E.ContextInfo{
+					MentionedJID: []string{"5585996081332@s.whatsapp.net"},
+				},
+			},
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for mentioned group message to be forwarded")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("expected inbound message to be forwarded")
+		}
+		if inbound.Content != "qual o status do processo?" {
+			t.Fatalf("expected mention stripped, got content=%q", inbound.Content)
+		}
+	}
+}
+
+func TestHandleIncoming_GroupMessage_RespondsWhenQuoted(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	gt := config.GroupTriggerConfig{MentionOnly: true}
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil, channels.WithGroupTrigger(gt)),
+		runCtx:      context.Background(),
+	}
+
+	quotedBotParticipant := "5585996081332@s.whatsapp.net"
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("1001", types.DefaultUserServer),
+				Chat:   types.NewJID("group123", types.GroupServer),
+			},
+			ID:       "mid_group_3",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text: proto.String("sim, confirmo"),
+				ContextInfo: &waE2E.ContextInfo{
+					Participant: &quotedBotParticipant,
+				},
+			},
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for quoted group message to be forwarded")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("expected inbound message to be forwarded")
+		}
+		if inbound.Content != "sim, confirmo" {
+			t.Fatalf("expected content 'sim, confirmo', got content=%q", inbound.Content)
+		}
+	}
+}
