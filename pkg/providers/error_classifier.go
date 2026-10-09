@@ -109,6 +109,15 @@ var (
 		substr("no api key found"),
 	}
 
+	locationPatterns = []errorPattern{
+		substr("location is not supported"),
+		substr("user location is not supported"),
+		substr("country not supported"),
+		substr("region not supported"),
+		substr("not supported for the api use"),
+		substr("failed_precondition"),
+	}
+
 	formatPatterns = []errorPattern{
 		substr("string should match pattern"),
 		substr("tool_use.id"),
@@ -197,6 +206,22 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 			Reason:   FailoverFormat,
 			Provider: provider,
 			Model:    model,
+			Wrapped:  err,
+		}
+	}
+	// Location/policy errors (e.g. Google API "User location is not supported"):
+	// Provider-specific access restrictions, always retriable (treat as FailoverAuth).
+	if matchesAny(msg, locationPatterns) {
+		status := extractHTTPStatus(msg)
+		var httpErr *common.HTTPError
+		if errors.As(err, &httpErr) && httpErr != nil {
+			status = httpErr.StatusCode
+		}
+		return &FailoverError{
+			Reason:   FailoverAuth,
+			Provider: provider,
+			Model:    model,
+			Status:   status,
 			Wrapped:  err,
 		}
 	}

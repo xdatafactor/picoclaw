@@ -84,7 +84,7 @@ func (t *XDFIntakeTool) SetMediaStore(store media.MediaStore) {
 func (t *XDFIntakeTool) Name() string { return "xdf_intake" }
 
 func (t *XDFIntakeTool) Description() string {
-	return "Process the current WhatsApp client's intake, documents, reset, slot selection, and meeting scheduling through the authenticated XDF Go Engine. The channel and client identity are always taken from the current message context."
+	return "Process the current WhatsApp client's intake, documents, reset, meetings, and approved TJCE public case consultations through the authenticated XDF Go Engine. The channel and client identity are always taken from the current message context. For pje_consulta, relay the source and freshness limitations; never infer deadlines or live PJe status."
 }
 
 func (t *XDFIntakeTool) Parameters() map[string]any {
@@ -101,9 +101,12 @@ func (t *XDFIntakeTool) Parameters() map[string]any {
 					"calendar_create",
 					"list_categories",
 					"add_keyword",
+					"pje_consulta",
 				},
 			},
-			"text": map[string]any{"type": "string", "description": "Customer message or an accurate intake summary"},
+			"numero_cnj": map[string]any{"type": "string", "maxLength": 25, "description": "Complete TJCE CNJ number already approved by the office for this conversation; never invent a number or infer ownership"},
+			"grau":       map[string]any{"type": "string", "enum": []string{"G1", "G2", "JE", "TR"}, "description": "Approved court grade; defaults to G1"},
+			"text":       map[string]any{"type": "string", "description": "Customer message or an accurate intake summary"},
 			"media": map[string]any{
 				"type": "array", "maxItems": 12,
 				"items": map[string]any{"type": "string", "description": "An inbound media:// reference or a PicoClaw media path; labels without file bytes are rejected"},
@@ -144,6 +147,20 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	var payload map[string]any
 
 	switch action {
+	case "pje_consulta":
+		number := strings.TrimSpace(xdfArgString(args, "numero_cnj"))
+		grade := xdfArgString(args, "grau")
+		if number == "" || len(number) > 25 {
+			return ErrorResult("pje_consulta requires a complete numero_cnj of at most 25 characters")
+		}
+		if grade == "" {
+			grade = "G1"
+		}
+		if grade != "G1" && grade != "G2" && grade != "JE" && grade != "TR" {
+			return ErrorResult("pje_consulta requires grau G1, G2, JE or TR")
+		}
+		payload = map[string]any{"channel": channel, "chat_id": chatID, "numero_cnj": number, "grau": grade}
+		path = "/api/v1/pje/tjce/consulta"
 	case "process":
 		text := xdfArgString(args, "text")
 		if len([]byte(text)) > 65536 {
@@ -320,6 +337,16 @@ func (t *XDFIntakeTool) postJSON(ctx context.Context, path string, payload map[s
 					}
 				}
 				encoded, _ := json.Marshal(safe)
+				return string(encoded), fmt.Errorf("XDF Go Engine returned HTTP %d", resp.StatusCode)
+			}
+		}
+		if path == "/api/v1/pje/tjce/consulta" {
+			var body struct {
+				Status   string `json:"status"`
+				Response string `json:"response"`
+			}
+			if json.Unmarshal(data, &body) == nil && body.Status != "" && body.Response != "" {
+				encoded, _ := json.Marshal(body)
 				return string(encoded), fmt.Errorf("XDF Go Engine returned HTTP %d", resp.StatusCode)
 			}
 		}
