@@ -257,3 +257,99 @@ func TestHandleIncoming_GroupMessage_RespondsWhenQuoted(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleIncoming_IgnoresOutboundIsFromMeMessages(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel:     channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:          context.Background(),
+		recentBotMsgIDs: make(map[string]time.Time),
+		lastHumanMsgAt:  make(map[string]time.Time),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:   types.NewJID("5585996081332", types.DefaultUserServer),
+				Chat:     types.NewJID("1001", types.DefaultUserServer),
+				IsFromMe: true,
+			},
+			ID:       "outbound_1",
+			PushName: "Rodolfo",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("Mensagem enviada pelo operador humano no WhatsApp Web"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	select {
+	case inbound, ok := <-messageBus.InboundChan():
+		if ok {
+			t.Fatalf("IsFromMe messages must never be forwarded to agent bus, got channel=%q content=%q", inbound.Channel, inbound.Content)
+		}
+	case <-ctx.Done():
+		// Expected: dropped without forwarding
+	}
+
+	// Verify human intervention timestamp was recorded for this chat
+	ch.botMsgMu.Lock()
+	lastHuman, recorded := ch.lastHumanMsgAt["1001@s.whatsapp.net"]
+	ch.botMsgMu.Unlock()
+	if !recorded || time.Since(lastHuman) > 5*time.Second {
+		t.Fatalf("expected human intervention recorded for chat, got recorded=%v time=%v", recorded, lastHuman)
+	}
+}
+
+func TestHandleIncoming_NormalizesSenderAndChatDeviceIDs(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel:     channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:          context.Background(),
+		recentBotMsgIDs: make(map[string]time.Time),
+		lastHumanMsgAt:  make(map[string]time.Time),
+	}
+
+	// Sender with device :1 (e.g. WhatsApp Web)
+	senderWithDevice := types.JID{
+		User:   "1001",
+		Server: types.DefaultUserServer,
+		Device: 1,
+	}
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: senderWithDevice,
+				Chat:   types.NewJID("1001", types.DefaultUserServer),
+			},
+			ID:       "mid_dev_1",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("Ola de dispositivo pareado"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for normalized message")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("expected inbound message")
+		}
+		if inbound.SenderID != "1001@s.whatsapp.net" {
+			t.Fatalf("expected normalized senderID without device '1001@s.whatsapp.net', got %q", inbound.SenderID)
+		}
+		if inbound.ChatID != "1001@s.whatsapp.net" {
+			t.Fatalf("expected normalized chatID '1001@s.whatsapp.net', got %q", inbound.ChatID)
+		}
+	}
+}
+

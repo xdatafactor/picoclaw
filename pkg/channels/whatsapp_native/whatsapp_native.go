@@ -76,6 +76,10 @@ type WhatsAppNativeChannel struct {
 	reconnecting bool
 	stopping     atomic.Bool    // set once Stop begins; prevents new wg.Add calls
 	wg           sync.WaitGroup // tracks background goroutines (QR handler, reconnect)
+
+	botMsgMu        sync.Mutex
+	recentBotMsgIDs map[string]time.Time
+	lastHumanMsgAt  map[string]time.Time
 }
 
 // NewWhatsAppNativeChannel creates a WhatsApp channel that uses whatsmeow for connection.
@@ -95,9 +99,11 @@ func NewWhatsAppNativeChannel(
 		storePath = "whatsapp"
 	}
 	c := &WhatsAppNativeChannel{
-		BaseChannel: base,
-		config:      cfg,
-		storePath:   storePath,
+		BaseChannel:     base,
+		config:          cfg,
+		storePath:       storePath,
+		recentBotMsgIDs: make(map[string]time.Time),
+		lastHumanMsgAt:  make(map[string]time.Time),
 	}
 	return c, nil
 }
@@ -647,8 +653,40 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		logger.InfoC("whatsapp", "Ignoring WhatsApp status/broadcast event (stories are not conversations)")
 		return
 	}
-	senderID := evt.Info.Sender.String()
-	chatID := evt.Info.Chat.String()
+	senderID := evt.Info.Sender.ToNonAD().String()
+	chatID := evt.Info.Chat.ToNonAD().String()
+
+	// Never process outgoing messages sent from this account (IsFromMe) as inbound
+	// user turns. This drops messages sent by human attendants on WhatsApp Web or mobile,
+	// automated business greetings, and bot echo acknowledgements.
+	if evt.Info.IsFromMe {
+		c.botMsgMu.Lock()
+		isBot := false
+		if _, ok := c.recentBotMsgIDs[evt.Info.ID]; ok {
+			isBot = true
+			delete(c.recentBotMsgIDs, evt.Info.ID)
+		} else {
+			if c.lastHumanMsgAt == nil {
+				c.lastHumanMsgAt = make(map[string]time.Time)
+			}
+			c.lastHumanMsgAt[chatID] = time.Now()
+			for id, t := range c.recentBotMsgIDs {
+				if time.Since(t) > 10*time.Minute {
+					delete(c.recentBotMsgIDs, id)
+				}
+			}
+		}
+		c.botMsgMu.Unlock()
+
+		if !isBot {
+			logger.InfoCF("whatsapp", "Human attendant outgoing message detected (silencing bot)", map[string]any{
+				"chat_id":    chatID,
+				"message_id": evt.Info.ID,
+			})
+		}
+		return
+	}
+
 	content := evt.Message.GetConversation()
 	if content == "" && evt.Message.ExtendedTextMessage != nil {
 		content = evt.Message.ExtendedTextMessage.GetText()
@@ -749,6 +787,12 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	} else {
 		metadata["peer_kind"] = "direct"
 		metadata["peer_id"] = senderID
+	}
+	c.botMsgMu.Lock()
+	lastHuman, hasHuman := c.lastHumanMsgAt[chatID]
+	c.botMsgMu.Unlock()
+	if hasHuman && time.Since(lastHuman) < 30*time.Minute {
+		metadata["recent_human_intervention"] = "true"
 	}
 
 	peerKind := "direct"
@@ -1024,8 +1068,18 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 		Conversation: proto.String(msg.Content),
 	}
 
-	if _, err = client.SendMessage(ctx, to, waMsg); err != nil {
+	resp, err := client.SendMessage(ctx, to, waMsg)
+	if err != nil {
 		return nil, fmt.Errorf("whatsapp send: %w", channels.ErrTemporary)
+	}
+	if resp.ID != "" {
+		c.botMsgMu.Lock()
+		if c.recentBotMsgIDs == nil {
+			c.recentBotMsgIDs = make(map[string]time.Time)
+		}
+		c.recentBotMsgIDs[resp.ID] = time.Now()
+		c.botMsgMu.Unlock()
+		return []string{resp.ID}, nil
 	}
 	return nil, nil
 }
