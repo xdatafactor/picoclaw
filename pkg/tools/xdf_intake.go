@@ -220,7 +220,7 @@ func (t *XDFIntakeTool) Execute(ctx context.Context, args map[string]any) *ToolR
 			return ErrorResult("attendee_email must be a valid email when supplied")
 		}
 		payload = map[string]any{
-			"channel": channel, "chat_id": chatID, "summary": "Reuniao R. Freire",
+			"channel": channel, "chat_id": chatID, "summary": "Reuniao Empresa de Advocacia",
 			"description": "Reuniao solicitada no atendimento WhatsApp", "conference": true,
 			"attendee_email": email, "selection_text": xdfArgString(args, "selection_text"),
 			"guest_emails": xdfArgStrings(args, "guest_emails"),
