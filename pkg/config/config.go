@@ -321,6 +321,7 @@ type AgentConfig struct {
 	Name                string            `json:"name,omitempty"`
 	Workspace           string            `json:"workspace,omitempty"`
 	Model               *AgentModelConfig `json:"model,omitempty"`
+	MaxTokens           int               `json:"max_tokens,omitempty"`
 	Skills              []string          `json:"skills,omitempty"`
 	Subagents           *SubagentsConfig  `json:"subagents,omitempty"`
 }

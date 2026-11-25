@@ -698,7 +698,13 @@ func TestAgentLoop_MediaSteeringCompletesCurrentToolBatch(t *testing.T) {
 	al.RegisterTool(tool2)
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := al.ProcessDirectWithChannel(context.Background(), "process documents", "media-session", "test", "chat1")
+		_, err := al.ProcessDirectWithChannel(
+			context.Background(),
+			"process documents",
+			"media-session",
+			"test",
+			"chat1",
+		)
 		resultCh <- err
 	}()
 
@@ -795,6 +801,21 @@ func TestAgentLoop_Steering_InitialPoll(t *testing.T) {
 	}
 }
 
+func waitForQueuedSteering(t *testing.T, al *AgentLoop) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for al.steering.len() == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("timeout waiting for inbound message to enter steering queue")
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestAgentLoop_Run_AutoContinuesLateSteeringMessage(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -863,6 +884,7 @@ func TestAgentLoop_Run_AutoContinuesLateSteeringMessage(t *testing.T) {
 		t.Fatalf("publish late inbound: %v", err)
 	}
 
+	waitForQueuedSteering(t, al)
 	close(provider.releaseFirstCall)
 
 	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -997,6 +1019,7 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 		t.Fatalf("publish late voice inbound: %v", err)
 	}
 
+	waitForQueuedSteering(t, al)
 	close(provider.releaseFirstCall)
 
 	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)

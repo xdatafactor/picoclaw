@@ -39,7 +39,9 @@ func TestIngestionOverridesKeepTextAndMediaOnConfiguredModel(t *testing.T) {
 		t.Fatal("text delegation selected the wrong model")
 	}
 	a.CandidateProviders[providers.ModelKey("gemini", "gemini-3.8-flash")] = &mockRegistryProvider{}
-	exec := &turnExecution{callMessages: []providers.Message{{Role: "user", Media: []string{"data:image/png;base64,test"}}}}
+	exec := &turnExecution{
+		callMessages: []providers.Message{{Role: "user", Media: []string{"data:image/png;base64,test"}}},
+	}
 	if err := (&Pipeline{Cfg: cfg}).routeMediaTurn(&turnState{agent: a}, exec); err != nil {
 		t.Fatal(err)
 	}

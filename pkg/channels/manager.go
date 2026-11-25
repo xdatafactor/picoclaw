@@ -2071,7 +2071,10 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	// Central safety guard: never allow sending to WhatsApp broadcast/status
 	// JIDs (publishing stories). Applies to every channel.
 	if isWhatsAppBroadcastTarget(outboundMessageChatID(msg)) {
-		return fmt.Errorf("outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)", outboundMessageChatID(msg))
+		return fmt.Errorf(
+			"outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			outboundMessageChatID(msg),
+		)
 	}
 
 	if constants.IsClientFacingChannel(channelName) && constants.ContainsLeakedInternalArtifacts(msg.Content) {
@@ -2130,7 +2133,10 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 	// Central safety guard: never allow media to WhatsApp broadcast/status
 	// JIDs (publishing stories). Applies to every channel.
 	if isWhatsAppBroadcastTarget(outboundMediaChatID(msg)) {
-		return fmt.Errorf("outbound blocked: refusing to send media to broadcast/status JID %q (stories are disabled)", outboundMediaChatID(msg))
+		return fmt.Errorf(
+			"outbound blocked: refusing to send media to broadcast/status JID %q (stories are disabled)",
+			outboundMediaChatID(msg),
+		)
 	}
 
 	m.mu.RLock()
@@ -2153,7 +2159,10 @@ func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, conten
 	// Central safety guard: never allow sending to WhatsApp broadcast/status
 	// JIDs (publishing stories). Applies to every channel.
 	if isWhatsAppBroadcastTarget(chatID) {
-		return fmt.Errorf("outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)", chatID)
+		return fmt.Errorf(
+			"outbound blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			chatID,
+		)
 	}
 
 	m.mu.RLock()

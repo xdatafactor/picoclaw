@@ -52,11 +52,15 @@ func TestXDFIntakeToolBindsIdentityToWhatsAppContext(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("Execute() error=%s", result.ForLLM)
 	}
-	if received["channel"] != "whatsapp_native" || received["chat_id"] != "client@lid" || received["sender_id"] != "client@lid" {
+	if received["channel"] != "whatsapp_native" || received["chat_id"] != "client@lid" ||
+		received["sender_id"] != "client@lid" {
 		t.Fatalf("identity was not bound to context: %#v", received)
 	}
 
-	blocked := tool.Execute(WithToolContext(context.Background(), "telegram", "admin"), map[string]any{"action": "process", "text": "consulta"})
+	blocked := tool.Execute(
+		WithToolContext(context.Background(), "telegram", "admin"),
+		map[string]any{"action": "process", "text": "consulta"},
+	)
 	if !blocked.IsError {
 		t.Fatal("non-WhatsApp execution should be blocked")
 	}
