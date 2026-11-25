@@ -662,6 +662,78 @@ func TestAgentLoop_Steering_SkipsRemainingTools(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_MediaSteeringCompletesCurrentToolBatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	tool1 := &slowTool{name: "first_document", duration: 50 * time.Millisecond, execCh: firstStarted}
+	tool2 := &slowTool{name: "second_document", duration: 10 * time.Millisecond, execCh: secondStarted}
+	provider := &toolCallProvider{
+		toolCalls: []providers.ToolCall{
+			{
+				ID: "call_media_1", Type: "function", Name: tool1.Name(),
+				Function: &providers.FunctionCall{Name: tool1.Name(), Arguments: "{}"}, Arguments: map[string]any{},
+			},
+			{
+				ID: "call_media_2", Type: "function", Name: tool2.Name(),
+				Function: &providers.FunctionCall{Name: tool2.Name(), Arguments: "{}"}, Arguments: map[string]any{},
+			},
+		},
+		finalResp: "documents handled",
+	}
+
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al.RegisterTool(tool1)
+	al.RegisterTool(tool2)
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := al.ProcessDirectWithChannel(
+			context.Background(),
+			"process documents",
+			"media-session",
+			"test",
+			"chat1",
+		)
+		resultCh <- err
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first document tool")
+	}
+	if err := al.Steer(providers.Message{
+		Role: "user", Content: "[document: third.pdf]", Media: []string{"/tmp/third.pdf"},
+	}); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second document tool was skipped after additive media steering")
+	}
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for media turn")
+	}
+}
+
 func TestAgentLoop_Steering_InitialPoll(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -726,6 +798,21 @@ func TestAgentLoop_Steering_InitialPoll(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected steering message to be injected into conversation context")
+	}
+}
+
+func waitForQueuedSteering(t *testing.T, al *AgentLoop) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for al.steering.len() == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("timeout waiting for inbound message to enter steering queue")
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -797,6 +884,7 @@ func TestAgentLoop_Run_AutoContinuesLateSteeringMessage(t *testing.T) {
 		t.Fatalf("publish late inbound: %v", err)
 	}
 
+	waitForQueuedSteering(t, al)
 	close(provider.releaseFirstCall)
 
 	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -931,6 +1019,7 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 		t.Fatalf("publish late voice inbound: %v", err)
 	}
 
+	waitForQueuedSteering(t, al)
 	close(provider.releaseFirstCall)
 
 	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)

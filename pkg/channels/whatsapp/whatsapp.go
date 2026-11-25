@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,7 +63,7 @@ func (c *WhatsAppChannel) Start(ctx context.Context) error {
 
 	conn, resp, err := dialer.Dial(c.url, nil)
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if err != nil {
 		c.cancel()
@@ -125,6 +126,17 @@ func (c *WhatsAppChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 
 	if c.conn == nil {
 		return nil, fmt.Errorf("whatsapp connection not established: %w", channels.ErrTemporary)
+	}
+
+	// Hard block: the WhatsApp channel must never publish status/stories.
+	// Sending to status@broadcast (or any broadcast JID) would post a story
+	// on the account. This is an explicit, non-negotiable safety rule.
+	if strings.Contains(msg.ChatID, "status@broadcast") ||
+		strings.Contains(msg.ChatID, "@broadcast") {
+		return nil, fmt.Errorf(
+			"whatsapp send blocked: refusing to send to broadcast/status JID %q (stories are disabled)",
+			msg.ChatID,
+		)
 	}
 
 	payload := map[string]any{

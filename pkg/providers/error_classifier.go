@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
 // Common patterns in Go HTTP error messages
@@ -88,6 +90,8 @@ var (
 	}
 
 	authPatterns = []errorPattern{
+		rxp(`\b(?:invalid|incorrect|malformed|wrong)[-_\s]+(?:api[-_\s]*)?key\b`),
+		rxp(`\b(?:api[-_\s]*)?key[-_\s]+(?:is[-_\s]+)?(?:invalid|incorrect|malformed|wrong)\b`),
 		rxp(`invalid[_ ]?api[_ ]?key`),
 		substr("incorrect api key"),
 		substr("invalid token"),
@@ -111,6 +115,10 @@ var (
 		substr("tool_use_id"),
 		substr("messages.1.content.1.tool_use.id"),
 		substr("invalid request format"),
+		// Zhipu API error code 1210: parameter error (e.g., image format incompatible)
+		substr("error code: 1210"),
+		substr("error code 1210"),
+		substr("zhipu api error code: 1210"),
 	}
 	contextOverflowPatterns = []errorPattern{
 		rxp(`context[_ ]?length[_ ]?exceeded`),
@@ -149,6 +157,16 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 	if err == context.Canceled {
 		return nil
 	}
+	var classified *FailoverError
+	if errors.As(err, &classified) {
+		if classified.Provider == "" {
+			classified.Provider = provider
+		}
+		if classified.Model == "" {
+			classified.Model = model
+		}
+		return classified
+	}
 
 	// Context deadline exceeded: treat as timeout, always fallback.
 	if err == context.DeadlineExceeded {
@@ -184,6 +202,18 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 	}
 
 	// Try HTTP status code extraction first.
+	var httpErr *common.HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		if reason := classifyByStatus(httpErr.StatusCode); reason != "" {
+			return &FailoverError{
+				Reason:   reason,
+				Provider: provider,
+				Model:    model,
+				Status:   httpErr.StatusCode,
+				Wrapped:  err,
+			}
+		}
+	}
 	if status := extractHTTPStatus(msg); status > 0 {
 		if reason := classifyByStatus(status); reason != "" {
 			return &FailoverError{

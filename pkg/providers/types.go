@@ -93,6 +93,7 @@ const (
 	FailoverContextOverflow FailoverReason = "context_overflow"
 	FailoverOverloaded      FailoverReason = "overloaded"
 	FailoverUnknown         FailoverReason = "unknown"
+	FailoverEmptyResponse   FailoverReason = "empty_response"
 )
 
 // FailoverError wraps an LLM provider error with classification metadata.

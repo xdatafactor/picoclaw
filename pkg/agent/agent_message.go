@@ -275,13 +275,15 @@ func (al *AgentLoop) processSystemMessage(
 		content = content[idx+8:] // Extract just the result part
 	}
 
-	// Skip internal channels - only log, don't send to user
-	if constants.IsInternalChannel(originChannel) {
-		logger.InfoCF("agent", "Subagent completed (internal channel)",
+	// Skip internal channels and client-facing channels - system messages and subagent
+	// completions must NEVER be dispatched to external client chats (e.g. WhatsApp).
+	if constants.IsInternalChannel(originChannel) || constants.IsClientFacingChannel(originChannel) {
+		logger.InfoCF("agent", "Subagent or system event completed (suppressed outbound)",
 			map[string]any{
-				"sender_id":   msg.SenderID,
-				"content_len": len(content),
-				"channel":     originChannel,
+				"sender_id":      msg.SenderID,
+				"content_len":    len(content),
+				"origin_channel": originChannel,
+				"origin_chat_id": originChatID,
 			})
 		return "", nil
 	}

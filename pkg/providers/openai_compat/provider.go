@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"net/url"
@@ -54,6 +53,7 @@ const (
 
 var stripModelPrefixProviders = map[string]struct{}{
 	"litellm":     {},
+	"nearai":      {},
 	"venice":      {},
 	"moonshot":    {},
 	"nvidia":      {},
@@ -154,7 +154,21 @@ func (p *Provider) buildRequestBody(
 	}
 
 	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.
-	nativeSearch, _ := options["native_search"].(bool)
+	nativeSearch, ok := options["native_search"].(bool)
+	if !ok {
+		// If the option is present but not a bool, log a warning and
+		// treat it as false — web_search_preview must not be injected
+		// when the caller cannot express a well-typed intent.
+		if _, present := options["native_search"]; present {
+			logger.WarnCF(
+				"provider.openai_compat",
+				"native_search option has unexpected type, ignoring",
+				map[string]any{
+					"type": fmt.Sprintf("%T", options["native_search"]),
+				},
+			)
+		}
+	}
 	nativeSearch = nativeSearch && isNativeSearchHost(p.apiBase)
 	if len(tools) > 0 || nativeSearch {
 		requestBody["tools"] = buildToolsList(tools, nativeSearch)
@@ -769,7 +783,10 @@ func parseStreamResponse(
 		raw := acc.argsJSON.String()
 		if raw != "" {
 			if err := json.Unmarshal([]byte(raw), &args); err != nil {
-				log.Printf("openai_compat stream: failed to decode tool call arguments for %q: %v", acc.name, err)
+				logger.WarnCF("openai_compat", "stream: failed to decode tool call arguments", map[string]any{
+					"tool":  acc.name,
+					"error": err.Error(),
+				})
 				args["raw"] = raw
 			}
 		}

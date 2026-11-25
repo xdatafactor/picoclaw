@@ -89,7 +89,8 @@ func hasModelConfiguration(m *config.ModelConfig) bool {
 	authMethod := strings.ToLower(strings.TrimSpace(m.AuthMethod))
 	apiKey := strings.TrimSpace(m.APIKey())
 
-	if authMethod == "oauth" || authMethod == "token" {
+	usesStoredAuth := authMethod == "oauth" || authMethod == "token"
+	if usesStoredAuth {
 		if configured, checked := hasStoredOAuthCredential(m); checked {
 			return configured
 		}
@@ -109,7 +110,23 @@ func hasModelConfiguration(m *config.ModelConfig) bool {
 		return true
 	}
 
-	return apiKey != ""
+	if apiKey != "" {
+		return true
+	}
+	if usesStoredAuth {
+		return false
+	}
+	apiBase := strings.TrimSpace(m.APIBase)
+	if apiBase == "" {
+		return false
+	}
+	switch providers.NormalizeProvider(protocol) {
+	case "anthropic", "anthropic-messages", "alibaba-coding-anthropic":
+		return false
+	}
+	defaultBase := providers.DefaultAPIBaseForProtocol(protocol)
+	return defaultBase == "" ||
+		normalizeAPIBaseForCompare(apiBase) != normalizeAPIBaseForCompare(defaultBase)
 }
 
 func hasStoredOAuthCredential(m *config.ModelConfig) (bool, bool) {
@@ -208,7 +225,10 @@ func (s *modelProbeCacheState) probe(cacheKey string, probeFunc func() bool) boo
 		return result, nil
 	})
 
-	result, _ := v.(bool)
+	result, ok := v.(bool)
+	if !ok {
+		return false
+	}
 	return result
 }
 

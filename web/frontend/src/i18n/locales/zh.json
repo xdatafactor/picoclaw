@@ -93,12 +93,15 @@
       "noModel": "未设置默认模型，请前往模型页面进行配置。"
     },
     "sendMessage": "发送消息",
-    "sendHint": "按 Enter 发送\nShift + Enter 换行",
+    "composeHint": "按 Enter 发送，Shift + Enter 换行",
     "contextTitle": "上下文",
     "contextDetail": "查看详情",
+    "contextCompressAt": "压缩阈值",
+    "contextSummarizeAt": "摘要阈值",
     "attachImage": "添加图片",
+    "dropImagesActive": "松开以添加图片",
     "removeImage": "移除图片",
-    "uploadedImage": "已上传图片",
+    "uploadedImage": "已添加图片",
     "invalidImage": "“{{name}}”不是支持的图片文件。",
     "imageTooLarge": "“{{name}}”超过了 {{size}} 限制。",
     "imageReadFailed": "读取“{{name}}”失败。",
@@ -250,17 +253,41 @@
     "action": {
       "edit": "编辑 API Key",
       "setDefault": "设为默认",
+      "addToFallback": "加入回退链",
+      "removeFromFallback": "移出回退链",
       "delete": "删除模型",
       "setDefaultDisabled": {
-        "setting": "正在设为默认...",
         "unavailable": "无法将不可用的模型设为默认",
         "isDefault": "该模型已是默认模型",
         "isVirtual": "无法将虚拟模型设为默认",
         "unsupportedProvider": "该服务商不能设为默认聊天模型。"
       },
+      "addToFallbackDisabled": {
+        "isDefault": "默认模型不能加入回退链"
+      },
       "deleteDisabled": {
         "isDefault": "无法删除默认模型"
       }
+    },
+    "defaultChain": {
+      "button": "回退链",
+      "title": "默认模型与回退链",
+      "manage": "管理链路",
+      "summary_one": "{{model}}，{{count}} 个回退模型",
+      "summary_other": "{{model}}，{{count}} 个回退模型",
+      "noDefault": "尚未选择默认模型。",
+      "dialogTitle": "编辑回退链",
+      "dialogDescription": "查看并调整默认模型失败后的回退顺序。",
+      "defaultModel": "默认模型",
+      "fallbackChain": "回退链",
+      "empty": "尚未添加回退模型。可在模型卡片中将模型加入回退链。",
+      "moveTop": "移到顶部",
+      "moveUp": "上移",
+      "moveDown": "下移",
+      "moveBottom": "移到底部",
+      "remove": "移出链路",
+      "saveSuccess": "默认模型链已保存。",
+      "unsaved": "默认模型或回退链已更改，保存后才会应用新的链路。"
     },
     "defaultOnSave": {
       "label": "默认模型",
@@ -847,6 +874,11 @@
       "allowed_cidrs": "允许访问网段",
       "allowed_cidrs_hint": "仅允许这些 CIDR 网段的客户端访问服务。可按行或逗号分隔；留空表示允许所有来源",
       "allowed_cidrs_placeholder": "192.168.1.0/24\n10.0.0.0/8",
+      "allow_localhost_bypass": "允许 localhost 绕过",
+      "allow_localhost_bypass_hint": "启用后，即使 localhost 请求不匹配允许访问网段，也会被放行。如果启动器位于同主机代理之后，建议关闭。",
+      "trusted_proxy_cidrs": "可信代理网段",
+      "trusted_proxy_cidrs_hint": "仅这些 CIDR 网段内的代理可以传递客户端 IP 信息，例如 X-Forwarded-For。留空表示忽略代理传递的客户端 IP 头。",
+      "trusted_proxy_cidrs_placeholder": "172.16.0.0/12\n127.0.0.1/32",
       "evolution_section_hint": "让 Agent 从已完成的回合中学习，并准备技能改进。",
       "evolution_enabled": "启用自进化",
       "evolution_enabled_hint": "记录已完成回合的学习数据。Draft 和 Apply 模式还可以生成技能更新。",

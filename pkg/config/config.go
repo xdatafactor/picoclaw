@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -194,6 +195,9 @@ type ExposePath struct {
 // Uses strings.Replacer for O(n+m) performance (computed once per SecurityConfig).
 // Short content (below FilterMinLength) is returned unchanged for performance.
 func (c *Config) FilterSensitiveData(content string) string {
+	if c == nil {
+		return content
+	}
 	// Check if filtering is enabled (default: true)
 	if !c.Tools.IsFilterSensitiveDataEnabled() {
 		return content
@@ -254,7 +258,7 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		Alias: (*Alias)(c),
 	}
 
-	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 {
+	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 || c.Session.DmScope != "" {
 		sessionCfg := c.Session
 		aux.Session = &sessionCfg
 	}
@@ -308,13 +312,19 @@ func (m AgentModelConfig) MarshalJSON() ([]byte, error) {
 }
 
 type AgentConfig struct {
-	ID        string            `json:"id"`
-	Default   bool              `json:"default,omitempty"`
-	Name      string            `json:"name,omitempty"`
-	Workspace string            `json:"workspace,omitempty"`
-	Model     *AgentModelConfig `json:"model,omitempty"`
-	Skills    []string          `json:"skills,omitempty"`
-	Subagents *SubagentsConfig  `json:"subagents,omitempty"`
+	// Omitted overrides inherit the global routing and media model settings.
+	Routing              *RoutingConfig    `json:"routing,omitempty"`
+	ImageModel           *string           `json:"image_model,omitempty"`
+	ImageModelFallbacks  []string          `json:"image_model_fallbacks,omitempty"`
+	ID                   string            `json:"id"`
+	Default              bool              `json:"default,omitempty"`
+	Name                 string            `json:"name,omitempty"`
+	Workspace            string            `json:"workspace,omitempty"`
+	Model                *AgentModelConfig `json:"model,omitempty"`
+	MaxTokens            int               `json:"max_tokens,omitempty"`
+	Skills               []string          `json:"skills,omitempty"`
+	Subagents            *SubagentsConfig  `json:"subagents,omitempty"`
+	RestrictToWorkspace  *bool             `json:"restrict_to_workspace,omitempty"`
 }
 
 type SubagentsConfig struct {
@@ -346,6 +356,47 @@ type DispatchSelector struct {
 type SessionConfig struct {
 	Dimensions    []string            `json:"dimensions,omitempty"`
 	IdentityLinks map[string][]string `json:"identity_links,omitempty"`
+	DmScope       string              `json:"dm_scope,omitempty"`
+}
+
+// ApplyDmScope translates the user-facing dm_scope value into the internal
+// dimensions array that the routing layer consumes. It is a no-op when
+// DmScope is empty or when Dimensions is already set (explicit Dimensions
+// take precedence over the derived value).
+func (s *SessionConfig) ApplyDmScope() {
+	if s.DmScope == "" || len(s.Dimensions) > 0 {
+		return
+	}
+	switch s.DmScope {
+	case "per-channel-peer":
+		s.Dimensions = []string{"chat", "sender"}
+	case "per-channel":
+		s.Dimensions = []string{"chat"}
+	case "per-peer":
+		s.Dimensions = []string{"sender"}
+	case "global":
+		s.Dimensions = nil
+	}
+}
+
+// DeriveDmScope sets DmScope based on Dimensions when DmScope is empty.
+// This handles legacy/fresh configs that only have explicit Dimensions
+// without a corresponding DmScope value, ensuring the API response always
+// includes a dm_scope that matches the actual runtime dimensions.
+func (s *SessionConfig) DeriveDmScope() {
+	if s.DmScope != "" || len(s.Dimensions) == 0 {
+		return
+	}
+	switch {
+	case slices.Equal(s.Dimensions, []string{"chat", "sender"}):
+		s.DmScope = "per-channel-peer"
+	case slices.Equal(s.Dimensions, []string{"chat"}):
+		s.DmScope = "per-channel"
+	case slices.Equal(s.Dimensions, []string{"sender"}):
+		s.DmScope = "per-peer"
+	}
+	// Dimensions not matching any known scope mapping (custom array)
+	// is fine — DmScope stays empty and the UI can handle it.
 }
 
 // RoutingConfig controls the intelligent model routing feature.
@@ -814,6 +865,12 @@ type ToolConfig struct {
 	Enabled bool `json:"enabled" yaml:"-" env:"ENABLED"`
 }
 
+type MessageToolsConfig struct {
+	ToolConfig `yaml:"-" envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+
+	MediaEnabled bool `json:"media_enabled" yaml:"-" env:"PICOCLAW_TOOLS_MESSAGE_MEDIA_ENABLED"`
+}
+
 type BraveConfig struct {
 	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_BRAVE_ENABLED"`
 	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_BRAVE_API_KEYS"`
@@ -863,6 +920,31 @@ func (c *TavilyConfig) SetAPIKeys(keys []string) {
 	for i, k := range keys {
 		c.APIKeys[i] = NewSecureString(k)
 	}
+}
+
+type KagiConfig struct {
+	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_ENABLED"`
+	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_KAGI_API_KEYS"`
+	BaseURL    string        `json:"base_url"          yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_BASE_URL"`
+	MaxResults int           `json:"max_results"       yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_MAX_RESULTS"`
+}
+
+// APIKey returns the Kagi API key
+func (c *KagiConfig) APIKey() string {
+	if len(c.APIKeys) == 0 {
+		return ""
+	}
+	return c.APIKeys[0].String()
+}
+
+// SetAPIKey sets the Kagi API key
+func (c *KagiConfig) SetAPIKey(key string) {
+	c.APIKeys = SimpleSecureStrings(key)
+}
+
+// SetAPIKeys sets the Kagi API keys
+func (c *KagiConfig) SetAPIKeys(keys []string) {
+	c.APIKeys = SimpleSecureStrings(keys...)
 }
 
 type DuckDuckGoConfig struct {
@@ -928,6 +1010,7 @@ type WebToolsConfig struct {
 	ToolConfig  `                   yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
 	Brave       BraveConfig        `yaml:"brave,omitempty"                                        json:"brave"`
 	Tavily      TavilyConfig       `yaml:"tavily,omitempty"                                       json:"tavily"`
+	Kagi        KagiConfig         `yaml:"kagi,omitempty"                                         json:"kagi"`
 	Sogou       SogouConfig        `yaml:"-"                                                      json:"sogou"`
 	DuckDuckGo  DuckDuckGoConfig   `yaml:"-"                                                      json:"duckduckgo"`
 	Gemini      GeminiSearchConfig `yaml:"gemini,omitempty"                                       json:"gemini"`
@@ -951,15 +1034,18 @@ type WebToolsConfig struct {
 }
 
 type CronToolsConfig struct {
-	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"        env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_CRON_"`
+	// 0 means no timeout.
+	ExecTimeoutMinutes    int      `json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
+	AllowCommand          bool     `json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	CommandAllowedRemotes []string `json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
 }
 
 type ExecConfig struct {
 	ToolConfig          `         envPrefix:"PICOCLAW_TOOLS_EXEC_"`
 	EnableDenyPatterns  bool     `                                 json:"enable_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	AllowRemote         bool     `                                 json:"allow_remote"          env:"PICOCLAW_TOOLS_EXEC_ALLOW_REMOTE"`
+	AllowedRemotes      []string `                                 json:"allowed_remotes"       env:"PICOCLAW_TOOLS_EXEC_ALLOWED_REMOTES"`
 	CustomDenyPatterns  []string `                                 json:"custom_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
 	CustomAllowPatterns []string `                                 json:"custom_allow_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_ALLOW_PATTERNS"`
 	TimeoutSeconds      int      `                                 json:"timeout_seconds"       env:"PICOCLAW_TOOLS_EXEC_TIMEOUT_SECONDS"` // 0 means use default (60s)
@@ -1026,7 +1112,7 @@ type ToolsConfig struct {
 	InstallSkill    ToolConfig         `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
 	ListDir         ToolConfig         `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
 	LoadImage       ToolConfig         `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
-	Message         ToolConfig         `json:"message"           yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+	Message         MessageToolsConfig `json:"message"           yaml:"-"`
 	ReadFile        ReadFileToolConfig `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
 	Serial          ToolConfig         `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
 	SendFile        ToolConfig         `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
@@ -1441,6 +1527,9 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.Agents.Defaults.Workspace = filepath.Join(homePath, pkg.WorkspaceName)
 	}
 
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
+
 	return cfg, nil
 }
 
@@ -1662,6 +1751,8 @@ func ResetToDefaults(configPath string) error {
 		return fmt.Errorf("backup before reset: %w", err)
 	}
 	cfg := DefaultConfig()
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
 	if err := cfg.SecurityCopyFrom(configPath); err != nil {
 		logger.WarnF("could not preserve security config", map[string]any{"error": err})
 	}
